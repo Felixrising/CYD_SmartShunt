@@ -118,6 +118,8 @@ bool loadShuntCalibration();
 void saveShuntCalibration();
 void performShuntCalibration();
 void drawShuntCalibrationScreen();
+float getDefaultMaxCurrent();
+float getDefaultShuntResistance();
 float getNumericInput(String prompt, float currentValue, float minVal, float maxVal, String unit);
 void performKnownLoadCalibration();
 void showStandardValues();
@@ -558,6 +560,14 @@ String getAveragingString() {
     case INA228_1024_SAMPLES: return "1024 Samples";
     default: return "Unknown";
   }
+}
+
+float getDefaultMaxCurrent() {
+  return DEFAULT_MAX_CURRENT;
+}
+
+float getDefaultShuntResistance() {
+  return DEFAULT_SHUNT_RESISTANCE;
 }
 
 void displayError(String message) {

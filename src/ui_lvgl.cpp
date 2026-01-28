@@ -17,8 +17,13 @@ extern void resetEnergyAccumulation(void);
 extern void cycleAveraging(void);
 extern String getAveragingString(void);
 extern void performTouchCalibration(void);
-extern void performShuntCalibration(void);
 extern void performKnownLoadCalibration(void);
+extern void calculateFromVoltageCurrent(void);
+extern void saveShuntCalibration(void);
+extern float getDefaultMaxCurrent(void);
+extern float getDefaultShuntResistance(void);
+extern float maxCurrent;
+extern float shuntResistance;
 
 /* ─── UX constants (CYD: 320×240, 8px grid, resistive touch) ─── */
 #define DISP_W    320
@@ -63,6 +68,8 @@ static lv_obj_t *scr_measurement = NULL;
 static lv_obj_t *scr_calibration = NULL;
 static lv_obj_t *scr_data = NULL;
 static lv_obj_t *scr_system = NULL;
+static lv_obj_t *scr_shunt_calibration = NULL;
+static lv_obj_t *scr_shunt_standard = NULL;
 
 static lv_obj_t *label_current = NULL;
 static lv_obj_t *label_voltage = NULL;
@@ -71,6 +78,8 @@ static lv_obj_t *label_energy = NULL;
 static lv_obj_t *label_temp = NULL;
 static lv_obj_t *label_status = NULL;
 static lv_obj_t *label_avg_val = NULL;
+static lv_obj_t *label_shunt_max = NULL;
+static lv_obj_t *label_shunt_res = NULL;
 
 static uint8_t *draw_buf1 = NULL;
 static uint8_t *draw_buf2 = NULL;
@@ -141,6 +150,16 @@ static void to_data(lv_event_t *e) {
 static void to_system(lv_event_t *e) {
   (void)e;
   if (scr_system) lv_screen_load(scr_system);
+}
+
+static void to_shunt_calibration(lv_event_t *e) {
+  (void)e;
+  if (scr_shunt_calibration) lv_screen_load(scr_shunt_calibration);
+}
+
+static void to_shunt_standard(lv_event_t *e) {
+  (void)e;
+  if (scr_shunt_standard) lv_screen_load(scr_shunt_standard);
 }
 
 /* ─── Persistent header: title left, one action right (Back or Settings) ─── */
@@ -223,6 +242,56 @@ static lv_obj_t *add_header_back_to_settings(lv_obj_t *parent, const char *title
   return bar;
 }
 
+/* Header for calibration sub-screens: Back returns to Calibration */
+static lv_obj_t *add_header_back_to_calibration(lv_obj_t *parent, const char *title) {
+  lv_obj_t *bar = lv_obj_create(parent);
+  lv_obj_set_size(bar, DISP_W, HEADER_H);
+  lv_obj_set_pos(bar, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(COL_HEADER), 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *tit = lv_label_create(bar);
+  lv_label_set_text(tit, title);
+  lv_obj_set_style_text_color(tit, lv_color_hex(COL_TEXT), 0);
+  lv_obj_set_pos(tit, MARGIN, (HEADER_H - 14) / 2);
+
+  lv_obj_t *btn = lv_btn_create(bar);
+  lv_obj_set_size(btn, BTN_W, BTN_H);
+  lv_obj_set_pos(btn, DISP_W - MARGIN - BTN_W, (HEADER_H - BTN_H) / 2);
+  lv_obj_set_style_radius(btn, CARD_R, 0);
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, "Back");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn, to_calibration, LV_EVENT_CLICKED, NULL);
+  return bar;
+}
+
+/* Header for standard shunt list: Back returns to Shunt calibration */
+static lv_obj_t *add_header_back_to_shunt(lv_obj_t *parent, const char *title) {
+  lv_obj_t *bar = lv_obj_create(parent);
+  lv_obj_set_size(bar, DISP_W, HEADER_H);
+  lv_obj_set_pos(bar, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(COL_HEADER), 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *tit = lv_label_create(bar);
+  lv_label_set_text(tit, title);
+  lv_obj_set_style_text_color(tit, lv_color_hex(COL_TEXT), 0);
+  lv_obj_set_pos(tit, MARGIN, (HEADER_H - 14) / 2);
+
+  lv_obj_t *btn = lv_btn_create(bar);
+  lv_obj_set_size(btn, BTN_W, BTN_H);
+  lv_obj_set_pos(btn, DISP_W - MARGIN - BTN_W, (HEADER_H - BTN_H) / 2);
+  lv_obj_set_style_radius(btn, CARD_R, 0);
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, "Back");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn, to_shunt_calibration, LV_EVENT_CLICKED, NULL);
+  return bar;
+}
+
 /* ─── Confirmation: destructive action (Reset energy) ─── */
 static void confirm_reset_energy_cb(lv_event_t *e) {
   lv_obj_t *msgbox = (lv_obj_t *)lv_event_get_user_data(e);
@@ -249,7 +318,7 @@ static void show_reset_energy_confirm(lv_event_t *e) {
 }
 
 /* ─── Calibration: confirm then run legacy full-screen flow (TFT take-over is intentional) ─── */
-typedef enum { CAL_TOUCH = 0, CAL_SHUNT, CAL_KNOWN } cal_type_t;
+typedef enum { CAL_TOUCH = 0 } cal_type_t;
 
 static void cal_confirm_continue_cb(lv_event_t *e) {
   lv_obj_t *msgbox = (lv_obj_t *)lv_event_get_user_data(e);
@@ -258,8 +327,6 @@ static void cal_confirm_continue_cb(lv_event_t *e) {
   if (msgbox) lv_msgbox_close(msgbox);
   switch (which) {
     case CAL_TOUCH:  performTouchCalibration();  break;
-    case CAL_SHUNT:  performShuntCalibration(); break;
-    case CAL_KNOWN:  performKnownLoadCalibration(); break;
   }
   if (scr_calibration) lv_screen_load(scr_calibration);
 }
@@ -287,16 +354,225 @@ static void act_touch_cal(lv_event_t *e) {
     "Full-screen prompts will appear. Touch the crosshairs. You will return here when done.");
 }
 
-static void act_shunt_cal(lv_event_t *e) {
-  (void)e;
-  show_cal_confirm(CAL_SHUNT, "Shunt calibration",
-    "Full-screen prompts will appear. You will return here when done.");
+
+static void update_shunt_labels(void) {
+  if (!label_shunt_max || !label_shunt_res) return;
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%.1f A", (double)maxCurrent);
+  lv_label_set_text(label_shunt_max, buf);
+  snprintf(buf, sizeof(buf), "%.3f m\xCE\xA9", (double)(shuntResistance * 1000.0f));
+  lv_label_set_text(label_shunt_res, buf);
 }
 
-static void act_known_load_cal(lv_event_t *e) {
+typedef enum { EDIT_MAX_CURRENT = 0, EDIT_SHUNT_RESISTANCE } edit_field_t;
+static edit_field_t edit_field = EDIT_MAX_CURRENT;
+static lv_obj_t *edit_modal = NULL;
+static lv_obj_t *edit_spinbox = NULL;
+static int32_t edit_scale = 1;
+static const char *edit_unit = NULL;
+
+static void close_edit_modal(void) {
+  if (edit_modal) {
+    lv_obj_del(edit_modal);
+    edit_modal = NULL;
+    edit_spinbox = NULL;
+  }
+}
+
+static void edit_cancel_cb(lv_event_t *e) {
   (void)e;
-  show_cal_confirm(CAL_KNOWN, "Known load calibration",
-    "Full-screen prompts will appear. You will return here when done.");
+  close_edit_modal();
+}
+
+static void edit_confirm_cb(lv_event_t *e) {
+  (void)e;
+  if (!edit_spinbox) return;
+  int32_t value = lv_spinbox_get_value(edit_spinbox);
+  float converted = (float)value / (float)edit_scale;
+  if (edit_field == EDIT_MAX_CURRENT) {
+    maxCurrent = converted;
+  } else {
+    shuntResistance = converted / 1000.0f;
+  }
+  update_shunt_labels();
+  close_edit_modal();
+}
+
+static void edit_increment_cb(lv_event_t *e) {
+  (void)e;
+  if (edit_spinbox) lv_spinbox_increment(edit_spinbox);
+}
+
+static void edit_decrement_cb(lv_event_t *e) {
+  (void)e;
+  if (edit_spinbox) lv_spinbox_decrement(edit_spinbox);
+}
+
+static void open_edit_modal(edit_field_t field) {
+  edit_field = field;
+  edit_modal = lv_obj_create(lv_screen_active());
+  lv_obj_set_size(edit_modal, DISP_W - 2 * MARGIN, 180);
+  lv_obj_center(edit_modal);
+  lv_obj_set_style_bg_color(edit_modal, lv_color_hex(COL_CARD), 0);
+  lv_obj_set_style_radius(edit_modal, CARD_R, 0);
+  lv_obj_set_style_pad_all(edit_modal, PAD, 0);
+  lv_obj_remove_flag(edit_modal, LV_OBJ_FLAG_SCROLLABLE);
+
+  const char *title = (field == EDIT_MAX_CURRENT) ? "Max current" : "Shunt resistance";
+  edit_unit = (field == EDIT_MAX_CURRENT) ? "A" : "m\xCE\xA9";
+  lv_obj_t *lbl = lv_label_create(edit_modal);
+  lv_label_set_text(lbl, title);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+  lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  edit_spinbox = lv_spinbox_create(edit_modal);
+  lv_obj_set_width(edit_spinbox, 180);
+  lv_obj_align(edit_spinbox, LV_ALIGN_TOP_MID, 0, 32);
+  lv_obj_set_style_text_color(edit_spinbox, lv_color_hex(COL_TEXT), 0);
+  if (field == EDIT_MAX_CURRENT) {
+    edit_scale = 10;
+    lv_spinbox_set_range(edit_spinbox, 10, 2000);
+    lv_spinbox_set_digit_format(edit_spinbox, 4, 1);
+    lv_spinbox_set_step(edit_spinbox, 1);
+    lv_spinbox_set_value(edit_spinbox, (int32_t)(maxCurrent * edit_scale));
+  } else {
+    edit_scale = 100;
+    lv_spinbox_set_range(edit_spinbox, 10, 10000);
+    lv_spinbox_set_digit_format(edit_spinbox, 5, 2);
+    lv_spinbox_set_step(edit_spinbox, 1);
+    lv_spinbox_set_value(edit_spinbox, (int32_t)(shuntResistance * 1000.0f * edit_scale));
+  }
+
+  lv_obj_t *unit = lv_label_create(edit_modal);
+  lv_label_set_text(unit, edit_unit);
+  lv_obj_set_style_text_color(unit, lv_color_hex(COL_MUTED), 0);
+  lv_obj_align(unit, LV_ALIGN_TOP_MID, 100, 40);
+
+  lv_obj_t *btn_minus = lv_btn_create(edit_modal);
+  lv_obj_set_size(btn_minus, 56, 40);
+  lv_obj_align(btn_minus, LV_ALIGN_LEFT_MID, 0, 20);
+  lv_obj_t *lbl_minus = lv_label_create(btn_minus);
+  lv_label_set_text(lbl_minus, "-");
+  lv_obj_center(lbl_minus);
+  lv_obj_add_event_cb(btn_minus, edit_decrement_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *btn_plus = lv_btn_create(edit_modal);
+  lv_obj_set_size(btn_plus, 56, 40);
+  lv_obj_align(btn_plus, LV_ALIGN_RIGHT_MID, 0, 20);
+  lv_obj_t *lbl_plus = lv_label_create(btn_plus);
+  lv_label_set_text(lbl_plus, "+");
+  lv_obj_center(lbl_plus);
+  lv_obj_add_event_cb(btn_plus, edit_increment_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *btn_cancel = lv_btn_create(edit_modal);
+  lv_obj_set_size(btn_cancel, 88, 32);
+  lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+  lv_label_set_text(lbl_cancel, "Cancel");
+  lv_obj_center(lbl_cancel);
+  lv_obj_add_event_cb(btn_cancel, edit_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *btn_ok = lv_btn_create(edit_modal);
+  lv_obj_set_size(btn_ok, 88, 32);
+  lv_obj_align(btn_ok, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_set_style_bg_color(btn_ok, lv_color_hex(COL_ACCENT), 0);
+  lv_obj_t *lbl_ok = lv_label_create(btn_ok);
+  lv_label_set_text(lbl_ok, "Save");
+  lv_obj_center(lbl_ok);
+  lv_obj_add_event_cb(btn_ok, edit_confirm_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void edit_max_current_cb(lv_event_t *e) {
+  (void)e;
+  open_edit_modal(EDIT_MAX_CURRENT);
+}
+
+static void edit_shunt_res_cb(lv_event_t *e) {
+  (void)e;
+  open_edit_modal(EDIT_SHUNT_RESISTANCE);
+}
+
+static void reset_shunt_confirm_cb(lv_event_t *e) {
+  lv_obj_t *msgbox = (lv_obj_t *)lv_event_get_user_data(e);
+  maxCurrent = getDefaultMaxCurrent();
+  shuntResistance = getDefaultShuntResistance();
+  update_shunt_labels();
+  if (msgbox) lv_msgbox_close(msgbox);
+}
+
+static void reset_shunt_cancel_cb(lv_event_t *e) {
+  lv_obj_t *msgbox = (lv_obj_t *)lv_event_get_user_data(e);
+  if (msgbox) lv_msgbox_close(msgbox);
+}
+
+static void reset_shunt_cb(lv_event_t *e) {
+  (void)e;
+  lv_obj_t *msgbox = lv_msgbox_create(lv_screen_active());
+  lv_msgbox_add_title(msgbox, "Reset defaults?");
+  lv_msgbox_add_text(msgbox, "This will restore the default shunt values.");
+  lv_obj_t *btn_cancel = lv_msgbox_add_footer_button(msgbox, "Cancel");
+  lv_obj_t *btn_reset = lv_msgbox_add_footer_button(msgbox, "Reset");
+  lv_obj_set_style_bg_color(btn_reset, lv_color_hex(COL_ERROR), 0);
+  lv_obj_add_event_cb(btn_cancel, reset_shunt_cancel_cb, LV_EVENT_CLICKED, msgbox);
+  lv_obj_add_event_cb(btn_reset, reset_shunt_confirm_cb, LV_EVENT_CLICKED, msgbox);
+}
+
+static void apply_shunt_save_cb(lv_event_t *e) {
+  (void)e;
+  saveShuntCalibration();
+  int result = ina228.setMaxCurrentShunt(maxCurrent, shuntResistance);
+  lv_obj_t *msgbox = lv_msgbox_create(lv_screen_active());
+  if (result == 0) {
+    lv_msgbox_add_title(msgbox, "Calibration saved");
+    lv_msgbox_add_text(msgbox, "Shunt values applied.");
+  } else {
+    lv_msgbox_add_title(msgbox, "Calibration error");
+    char buf[32];
+    snprintf(buf, sizeof(buf), "INA228 error: %d", result);
+    lv_msgbox_add_text(msgbox, buf);
+  }
+  lv_msgbox_add_footer_button(msgbox, "OK");
+}
+
+static void open_known_load_cb(lv_event_t *e) {
+  (void)e;
+  performKnownLoadCalibration();
+  update_shunt_labels();
+  if (scr_shunt_calibration) lv_screen_load(scr_shunt_calibration);
+}
+
+static void open_calc_mv_cb(lv_event_t *e) {
+  (void)e;
+  calculateFromVoltageCurrent();
+  update_shunt_labels();
+  if (scr_shunt_calibration) lv_screen_load(scr_shunt_calibration);
+}
+
+typedef struct {
+  float max_current;
+  float shunt_milliohm;
+  const char *label;
+} shunt_standard_t;
+
+static const shunt_standard_t k_shunt_standards[] = {
+  {10.0f, 15.0f, "10A / 15.000 m\xCE\xA9"},
+  {20.0f, 7.5f,  "20A / 7.500 m\xCE\xA9"},
+  {30.0f, 5.0f,  "30A / 5.000 m\xCE\xA9"},
+  {50.0f, 1.5f,  "50A / 1.500 m\xCE\xA9"},
+  {75.0f, 1.0f,  "75A / 1.000 m\xCE\xA9"},
+  {100.0f, 0.75f, "100A / 0.750 m\xCE\xA9"},
+  {150.0f, 0.5f, "150A / 0.500 m\xCE\xA9"},
+  {200.0f, 0.375f, "200A / 0.375 m\xCE\xA9"},
+};
+
+static void select_standard_cb(lv_event_t *e) {
+  lv_obj_t *btn = lv_event_get_target(e);
+  const shunt_standard_t *standard = (const shunt_standard_t *)lv_obj_get_user_data(btn);
+  if (!standard) return;
+  maxCurrent = standard->max_current;
+  shuntResistance = standard->shunt_milliohm / 1000.0f;
+  update_shunt_labels();
+  if (scr_shunt_calibration) lv_screen_load(scr_shunt_calibration);
 }
 
 static void act_cycle_avg(lv_event_t *e) {
@@ -334,6 +610,48 @@ static lv_obj_t *add_category_row(lv_obj_t *parent, const char *name, lv_coord_t
   lv_obj_t *row = lv_btn_create(parent);
   lv_obj_set_size(row, DISP_W - 2 * MARGIN, LIST_ITEM_H);
   lv_obj_set_pos(row, MARGIN, y);
+  lv_obj_set_style_radius(row, CARD_R, 0);
+  lv_obj_set_style_bg_color(row, lv_color_hex(COL_CARD), 0);
+
+  lv_obj_t *lbl = lv_label_create(row);
+  lv_label_set_text(lbl, name);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+  lv_obj_set_pos(lbl, PAD, (LIST_ITEM_H - 14) / 2);
+
+  lv_obj_t *chev = lv_label_create(row);
+  lv_label_set_text(chev, ">");
+  lv_obj_set_style_text_color(chev, lv_color_hex(COL_ACCENT), 0);
+  lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -PAD, 0);
+
+  if (cb) lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, NULL);
+  return row;
+}
+
+static lv_obj_t *add_setting_row_flex(lv_obj_t *parent, const char *name, const char *value,
+    lv_event_cb_t tap_cb) {
+  lv_obj_t *row = lv_btn_create(parent);
+  lv_obj_set_size(row, DISP_W - 2 * MARGIN, ROW_H);
+  lv_obj_set_style_radius(row, CARD_R, 0);
+  lv_obj_set_style_bg_color(row, lv_color_hex(COL_CARD), 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *lbl = lv_label_create(row);
+  lv_label_set_text(lbl, name);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(COL_MUTED), 0);
+  lv_obj_set_pos(lbl, PAD, (ROW_H - 14) / 2);
+
+  lv_obj_t *val = lv_label_create(row);
+  lv_label_set_text(val, value);
+  lv_obj_set_style_text_color(val, lv_color_hex(COL_TEXT), 0);
+  lv_obj_align(val, LV_ALIGN_RIGHT_MID, -PAD, 0);
+
+  if (tap_cb) lv_obj_add_event_cb(row, tap_cb, LV_EVENT_CLICKED, NULL);
+  return val;
+}
+
+static lv_obj_t *add_category_row_flex(lv_obj_t *parent, const char *name, lv_event_cb_t cb) {
+  lv_obj_t *row = lv_btn_create(parent);
+  lv_obj_set_size(row, DISP_W - 2 * MARGIN, LIST_ITEM_H);
   lv_obj_set_style_radius(row, CARD_R, 0);
   lv_obj_set_style_bg_color(row, lv_color_hex(COL_CARD), 0);
 
@@ -450,9 +768,54 @@ static void build_calibration(void) {
   add_header_back_to_settings(scr_calibration, "Calibration");
 
   lv_coord_t y = HEADER_H + GAP;
-  add_category_row(scr_calibration, "Touch calibration",  y, act_touch_cal);   y += LIST_ITEM_H + GAP;
-  add_category_row(scr_calibration, "Shunt calibration",  y, act_shunt_cal);   y += LIST_ITEM_H + GAP;
-  add_category_row(scr_calibration, "Known load cal",     y, act_known_load_cal);
+  add_category_row(scr_calibration, "Touch calibration",  y, act_touch_cal);     y += LIST_ITEM_H + GAP;
+  add_category_row(scr_calibration, "Shunt calibration",  y, to_shunt_calibration);
+}
+
+static void build_shunt_calibration(void) {
+  scr_shunt_calibration = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr_shunt_calibration, lv_color_hex(COL_BG), 0);
+  lv_obj_remove_flag(scr_shunt_calibration, LV_OBJ_FLAG_SCROLLABLE);
+
+  add_header_back_to_calibration(scr_shunt_calibration, "Shunt calibration");
+
+  lv_obj_t *list = lv_obj_create(scr_shunt_calibration);
+  lv_obj_set_size(list, DISP_W, DISP_H - HEADER_H);
+  lv_obj_set_pos(list, 0, HEADER_H);
+  lv_obj_set_style_bg_color(list, lv_color_hex(COL_BG), 0);
+  lv_obj_set_style_pad_all(list, MARGIN, 0);
+  lv_obj_set_style_pad_row(list, GAP, 0);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+
+  label_shunt_max = add_setting_row_flex(list, "Max current", "--", edit_max_current_cb);
+  label_shunt_res = add_setting_row_flex(list, "Shunt resistance", "--", edit_shunt_res_cb);
+  add_category_row_flex(list, "Standard values", to_shunt_standard);
+  add_category_row_flex(list, "Known load calibration", open_known_load_cb);
+  add_category_row_flex(list, "Calc from mV/current", open_calc_mv_cb);
+  add_category_row_flex(list, "Reset defaults", reset_shunt_cb);
+  add_category_row_flex(list, "Save & apply", apply_shunt_save_cb);
+
+  update_shunt_labels();
+}
+
+static void build_shunt_standard(void) {
+  scr_shunt_standard = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr_shunt_standard, lv_color_hex(COL_BG), 0);
+  lv_obj_remove_flag(scr_shunt_standard, LV_OBJ_FLAG_SCROLLABLE);
+
+  add_header_back_to_shunt(scr_shunt_standard, "Standard shunts");
+
+  lv_obj_t *list = lv_list_create(scr_shunt_standard);
+  lv_obj_set_size(list, DISP_W, DISP_H - HEADER_H);
+  lv_obj_set_pos(list, 0, HEADER_H);
+  lv_obj_set_style_bg_color(list, lv_color_hex(COL_BG), 0);
+
+  for (size_t i = 0; i < sizeof(k_shunt_standards) / sizeof(k_shunt_standards[0]); i++) {
+    const shunt_standard_t *standard = &k_shunt_standards[i];
+    lv_obj_t *btn = lv_list_add_btn(list, NULL, standard->label);
+    lv_obj_set_user_data(btn, (void *)standard);
+    lv_obj_add_event_cb(btn, select_standard_cb, LV_EVENT_CLICKED, NULL);
+  }
 }
 
 /* ─── Screen 5: Data ─── */
@@ -540,6 +903,8 @@ void ui_lvgl_init(void) {
   build_settings_home();
   build_measurement();
   build_calibration();
+  build_shunt_calibration();
+  build_shunt_standard();
   build_data();
   build_system();
 
