@@ -20,7 +20,7 @@
 #include <Preferences.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
-#include <INA228.h>
+#include "sensor.h"
 #include "touch.h"
 #ifndef USE_LEGACY_UI
 #include "ui_lvgl.h"
@@ -81,9 +81,6 @@ XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 // Create TFT display instance
 TFT_eSPI tft = TFT_eSPI();
 
-// Create INA228 sensor instance
-INA228 ina228(INA228_ADDRESS);
-
 // Screen state
 enum ScreenMode {
   SCREEN_MONITORING,
@@ -98,8 +95,6 @@ const unsigned long UPDATE_INTERVAL = 500; // Update every 500ms
 
 // Settings
 bool energyAccumulationEnabled = true;
-uint8_t averagingSamples = INA228_16_SAMPLES;
-uint8_t conversionTime = INA228_1052_us;
 
 // Forward declarations
 void displayError(String message);
@@ -177,38 +172,20 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   delay(100);
   
-  // Initialize INA228
-  Serial.println("Initializing INA228...");
-  if (!ina228.begin()) {
-    Serial.println("ERROR: INA228 not found!");
-    displayError("INA228 not found!");
-    while(1) delay(1000);
+  // Initialize current/power sensor (INA228 or other INA* via sensor abstraction)
+  Serial.println("Initializing sensor...");
+  if (!SensorBegin()) {
+    Serial.println("Sensor not found - dashboard will show \"Not connected\".");
+  } else {
+    Serial.print(SensorGetDriverName());
+    Serial.println(" connected!");
+    int result = SensorSetShunt(maxCurrent, shuntResistance);
+    if (result != 0) {
+      Serial.print("Warning: shunt config failed (code ");
+      Serial.print(result);
+      Serial.println("). Using defaults.");
+    }
   }
-  Serial.println("INA228 connected!");
-  
-  // Calibrate the sensor with loaded values
-  Serial.print("Calibrating INA228 (Max Current: ");
-  Serial.print(maxCurrent);
-  Serial.print("A, Shunt: ");
-  Serial.print(shuntResistance);
-  Serial.println("Ω)...");
-  
-  int result = ina228.setMaxCurrentShunt(maxCurrent, shuntResistance);
-  if (result != 0) {
-    Serial.print("ERROR: Calibration failed with code: ");
-    Serial.println(result);
-    displayError("Calibration failed!");
-    while(1) delay(1000);
-  }
-  
-  // Configure sensor
-  ina228.setMode(INA228_MODE_CONT_TEMP_BUS_SHUNT);
-  ina228.setAverage(averagingSamples);
-  ina228.setBusVoltageConversionTime(conversionTime);
-  ina228.setShuntVoltageConversionTime(conversionTime);
-  ina228.setTemperatureConversionTime(conversionTime);
-  ina228.setTemperatureCompensation(true);
-  
   Serial.println("Setup complete!");
 
 #ifdef USE_LEGACY_UI
@@ -322,12 +299,11 @@ void drawMonitoringScreen() {
 }
 
 void updateMonitoringScreen() {
-  // Read sensor values
-  float current = ina228.getCurrent();
-  float voltage = ina228.getBusVoltage();
-  float power = ina228.getPower();
-  float temperature = ina228.getTemperature();
-  double energy = ina228.getWattHour();
+  float current = SensorGetCurrent();
+  float voltage = SensorGetBusVoltage();
+  float power = SensorGetPower();
+  float temperature = SensorGetTemperature();
+  double energy = SensorGetWattHour();
   
   // Clear previous values area (from y=36 to y=DISPLAY_HEIGHT-1)
   tft.fillRect(0, 36, DISPLAY_WIDTH, DISPLAY_HEIGHT - 36, TFT_BLACK);
@@ -399,12 +375,11 @@ void updateMonitoringScreen() {
   String tempStr = String(temperature, 1) + " C";
   tft.drawString(tempStr, 8, DISPLAY_HEIGHT - 20, 1);
   
-  // Status indicator - Bottom right (small dot)
-  uint16_t statusColor = (ina228.isConnected()) ? TFT_GREEN : TFT_RED;
+  uint16_t statusColor = SensorIsConnected() ? TFT_GREEN : TFT_RED;
   tft.fillCircle(DISPLAY_WIDTH - 12, DISPLAY_HEIGHT - 12, 3, statusColor);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString("INA228", DISPLAY_WIDTH - 20, DISPLAY_HEIGHT - 20, 1);
+  tft.drawString(SensorGetDriverName(), DISPLAY_WIDTH - 20, DISPLAY_HEIGHT - 20, 1);
   
   // Serial output for debugging
   Serial.print("I=");
@@ -479,9 +454,9 @@ void drawSettingsScreen() {
   tft.setTextDatum(TL_DATUM);
   tft.drawString("SENSOR INFO", 10, 225, 1);
   
-  if (ina228.isConnected()) {
+  if (SensorIsConnected()) {
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    String info = "INA228 @ 0x" + String(INA228_ADDRESS, HEX);
+    String info = String(SensorGetDriverName()) + " connected";
     tft.drawString(info, 10, 240, 1);
     
     // Show calibration status
@@ -496,70 +471,31 @@ void drawSettingsScreen() {
 
 void resetEnergyAccumulation() {
   Serial.println("Resetting energy and charge accumulation...");
-  ina228.setAccumulation(1); // Clear accumulation registers
-  delay(100);
-  ina228.setAccumulation(0); // Return to normal operation
-  
-  // Visual feedback
+  SensorResetEnergy();
+
+#ifdef USE_LEGACY_UI
+  // Visual feedback (legacy TFT only)
   tft.fillRoundRect(10, 45, DISPLAY_WIDTH - 20, 32, 4, TFT_GREEN);
   tft.drawRoundRect(10, 45, DISPLAY_WIDTH - 20, 32, 4, TFT_WHITE);
   tft.setTextColor(TFT_BLACK, TFT_GREEN);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("RESET COMPLETE", DISPLAY_WIDTH / 2, 61, 2);
   delay(1000);
-  
-  // Redraw settings screen
   drawSettingsScreen();
+#endif
 }
 
 void cycleAveraging() {
-  switch(averagingSamples) {
-    case INA228_1_SAMPLE:
-      averagingSamples = INA228_4_SAMPLES;
-      break;
-    case INA228_4_SAMPLES:
-      averagingSamples = INA228_16_SAMPLES;
-      break;
-    case INA228_16_SAMPLES:
-      averagingSamples = INA228_64_SAMPLES;
-      break;
-    case INA228_64_SAMPLES:
-      averagingSamples = INA228_128_SAMPLES;
-      break;
-    case INA228_128_SAMPLES:
-      averagingSamples = INA228_256_SAMPLES;
-      break;
-    case INA228_256_SAMPLES:
-      averagingSamples = INA228_512_SAMPLES;
-      break;
-    case INA228_512_SAMPLES:
-      averagingSamples = INA228_1024_SAMPLES;
-      break;
-    default:
-      averagingSamples = INA228_1_SAMPLE;
-      break;
-  }
-  
-  ina228.setAverage(averagingSamples);
+  SensorCycleAveraging();
   Serial.print("Averaging set to: ");
-  Serial.println(getAveragingString());
-  
-  // Redraw settings screen
+  Serial.println(SensorGetAveragingString());
+#ifdef USE_LEGACY_UI
   drawSettingsScreen();
+#endif
 }
 
 String getAveragingString() {
-  switch(averagingSamples) {
-    case INA228_1_SAMPLE: return "1 Sample";
-    case INA228_4_SAMPLES: return "4 Samples";
-    case INA228_16_SAMPLES: return "16 Samples";
-    case INA228_64_SAMPLES: return "64 Samples";
-    case INA228_128_SAMPLES: return "128 Samples";
-    case INA228_256_SAMPLES: return "256 Samples";
-    case INA228_512_SAMPLES: return "512 Samples";
-    case INA228_1024_SAMPLES: return "1024 Samples";
-    default: return "Unknown";
-  }
+  return String(SensorGetAveragingString());
 }
 
 float getDefaultMaxCurrent() {
@@ -705,7 +641,9 @@ void performTouchCalibration() {
   tft.drawString("Calibration", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2 - 20, 2);
   tft.drawString("Complete!", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2 + 20, 2);
   delay(2000);
-  
+  /* Clear to black before handing back to LVGL so it doesn't see leftover green */
+  tft.fillScreen(TFT_BLACK);
+
   Serial.println("Calibration complete!");
   Serial.print("X: "); Serial.print(touchCal.xMin); Serial.print(" - "); Serial.println(touchCal.xMax);
   Serial.print("Y: "); Serial.print(touchCal.yMin); Serial.print(" - "); Serial.println(touchCal.yMax);
@@ -1163,8 +1101,8 @@ void performKnownLoadCalibration() {
     if (millis() - lastUpdate >= 500) {
       lastUpdate = millis();
       
-      float measuredCurrent = ina228.getCurrent();
-      float measuredVoltage = ina228.getBusVoltage();
+      float measuredCurrent = SensorGetCurrent();
+      float measuredVoltage = SensorGetBusVoltage();
       
       // Only update if values changed significantly (to reduce flicker)
       if (abs(measuredCurrent - lastMeasuredCurrent) > 0.01 || abs(measuredVoltage - lastMeasuredVoltage) > 0.01) {
@@ -1246,8 +1184,8 @@ void performKnownLoadCalibration() {
       }
       // Apply Corrections
       else if (p.x >= 10 && p.x <= DISPLAY_WIDTH - 10 && p.y >= DISPLAY_HEIGHT - 22 && p.y <= DISPLAY_HEIGHT - 2) {
-        float measuredCurrent = ina228.getCurrent();
-        float measuredVoltage = ina228.getBusVoltage();
+        float measuredCurrent = SensorGetCurrent();
+        float measuredVoltage = SensorGetBusVoltage();
         
         if (measuredCurrent != 0 && measuredVoltage != 0) {
           // Calculate corrected values
@@ -1471,8 +1409,7 @@ void performShuntCalibration() {
         // Save to NVS
         saveShuntCalibration();
         
-        // Recalibrate INA228 with new values
-        int result = ina228.setMaxCurrentShunt(maxCurrent, shuntResistance);
+        int result = SensorSetShunt(maxCurrent, shuntResistance);
         if (result == 0) {
           // Success
           tft.fillScreen(TFT_GREEN);

@@ -1,6 +1,6 @@
-# CYD Smart Shunt - ESP32 Cheap Yellow Display Project
+# CYD Smart Shunt
 
-DC Shunt Meter project using ESP32 CYD (Cheap Yellow Display) with touch screen and INA228-based 50A/75mV shunt.
+ESP32 Cheap Yellow Display (CYD) based **DC current + voltage meter** with a touch UI, designed around an **INA228 50A/75mV shunt** (and compatible INA-family parts).
 
 ## Hardware
 
@@ -8,7 +8,9 @@ DC Shunt Meter project using ESP32 CYD (Cheap Yellow Display) with touch screen 
   - 320x240 2.8" LCD Display
   - Resistive Touch Screen (XPT2046)
   - ESP32 with WiFi and Bluetooth
-- **Shunt**: INA228-based 50A/75mV 0.5% accuracy shunt
+- **Shunt / sensor**:
+  - INA228-based 50A/75mV 0.5% accuracy shunt
+  - I2C sensor support: **INA228 / INA226 / INA219** (auto-detected)
 
 ## Project Setup
 
@@ -40,20 +42,28 @@ pio device monitor
 
 ## Current Status
 
-✅ **Hello World + Touch Test** - Basic display and touch functionality working
+✅ **LVGL dashboard + touch + sensor stack** working
 
 The current firmware demonstrates:
-- Display initialization and text rendering
-- Touch screen input detection
-- Real-time touch coordinate display
+- LVGL dashboard (Current / Voltage, Power + Energy on one line, Temperature)
+- Long-press **Energy** on the dashboard to reset the accumulated energy/charge (with confirmation)
+- Touch calibration stored in NVS and reloaded on boot
+- Sensor auto-detection and reading (INA228/INA226/INA219)
+- Shunt calibration tools (standard shunts + known-load calibration)
 
 ## Next Steps
 
-- [ ] Integrate INA228 I2C communication
-- [ ] Implement shunt measurement reading
-- [ ] Create UI for displaying current, voltage, power
-- [ ] Add data logging capabilities
-- [ ] Implement calibration features
+- [ ] Improve dashboard polish (icons, formatting, smoothing, error states)
+- [ ] Data page: min/max, session stats, export/logging
+- [ ] Alarms: over-current / under-voltage, configurable thresholds
+- [ ] Better shunt calibration workflow + persistence/versioning
+
+## Future enhancements (Victron SmartShunt emulation)
+
+The longer-term goal is to emulate a Victron SmartShunt-style data source so other apps can consume the readings:
+
+- [ ] **Serial output** compatible with Victron-style shunt telemetry
+- [ ] **BLE / GATT broadcasting** in a format that *VictronConnect might be able to read*
 
 ## Pin Reference
 
