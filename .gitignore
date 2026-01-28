@@ -1,0 +1,13 @@
+# PlatformIO
+.pio/
+.vscode/
+*.elf
+*.bin
+*.hex
+
+# Local reference (optional: remove this line to include reference/ in the repo)
+reference/
+
+# OS
+.DS_Store
+Thumbs.db
