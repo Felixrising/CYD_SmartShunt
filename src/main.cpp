@@ -21,6 +21,7 @@
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include "sensor.h"
+#include "telemetry_victron.h"
 #include "touch.h"
 #ifndef USE_LEGACY_UI
 #include "ui_lvgl.h"
@@ -72,6 +73,9 @@ TouchCalibration_t touchCal = {0, 0, 0, 0, false};
 #define NVS_KEY_MAX_CURRENT "max_current"
 #define NVS_KEY_SHUNT_RESISTANCE "shunt_res"
 
+// NVS key for VE.Direct integration (Settings > Integration)
+#define NVS_KEY_VEDIRECT_ENABLED "vedirect_enabled"
+
 Preferences preferences;
 
 // Create SPI instance for touch screen (uses VSPI)
@@ -119,6 +123,8 @@ float getNumericInput(String prompt, float currentValue, float minVal, float max
 void performKnownLoadCalibration();
 void showStandardValues();
 void calculateFromVoltageCurrent();
+bool get_vedirect_enabled(void);
+void set_vedirect_enabled(bool on);
 
 void setup() {
   Serial.begin(115200);
@@ -188,6 +194,13 @@ void setup() {
   }
   Serial.println("Setup complete!");
 
+  // Initialize Victron VE.Direct: load enable flag from NVS, then start UART if enabled
+  {
+    bool vedirectOn = preferences.getBool(NVS_KEY_VEDIRECT_ENABLED, true);
+    TelemetryVictronSetEnabled(vedirectOn);
+    TelemetryVictronInit();
+  }
+
 #ifdef USE_LEGACY_UI
   // Draw initial screen (old TFT_eSPI UI)
   drawMonitoringScreen();
@@ -222,6 +235,23 @@ void loop() {
 #else
   // LVGL: tick + timer handler every ~5 ms
   ui_lvgl_poll();
+
+  // Telemetry: feed latest readings into Victron VE.Direct backend
+  static unsigned long lastTelemetryPoll = 0;
+  unsigned long now = millis();
+  if (now - lastTelemetryPoll >= UPDATE_INTERVAL) {  // reuse main update cadence
+    TelemetryState t;
+    t.voltage_V        = SensorGetBusVoltage();
+    t.current_A        = SensorGetCurrent();
+    t.power_W          = SensorGetPower();
+    t.energy_Wh        = SensorGetWattHour();
+    t.temperature_C    = SensorGetTemperature();
+    t.sensor_connected = SensorIsConnected();
+    // t.soc_percent, t.capacity_Ah reserved for future use
+    TelemetryVictronUpdate(t);
+    lastTelemetryPoll = now;
+  }
+
   delay(5);
 #endif
 }
@@ -699,6 +729,17 @@ void saveShuntCalibration() {
   Serial.println("Shunt calibration saved to NVS");
   Serial.print("Max Current: "); Serial.print(maxCurrent); Serial.println("A");
   Serial.print("Shunt: "); Serial.print(shuntResistance * 1000); Serial.println("mΩ");
+}
+
+bool get_vedirect_enabled(void) {
+  return preferences.getBool(NVS_KEY_VEDIRECT_ENABLED, true);
+}
+
+void set_vedirect_enabled(bool on) {
+  preferences.putBool(NVS_KEY_VEDIRECT_ENABLED, on);
+  TelemetryVictronSetEnabled(on);
+  if (on)
+    TelemetryVictronInit();  /* start UART when enabling at runtime */
 }
 
 void drawShuntCalibrationScreen() {

@@ -6,6 +6,7 @@
 #include "ui_lvgl.h"
 #include "touch.h"
 #include "sensor.h"
+#include "telemetry_victron.h"
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <Arduino.h>
@@ -22,6 +23,8 @@ extern float getDefaultMaxCurrent(void);
 extern float getDefaultShuntResistance(void);
 extern float maxCurrent;
 extern float shuntResistance;
+extern bool get_vedirect_enabled(void);
+extern void set_vedirect_enabled(bool on);
 
 /* ─── UX constants (CYD: 320×240, 8px grid, resistive touch) ─── */
 #define DISP_W    320
@@ -66,6 +69,7 @@ static lv_obj_t *scr_measurement = NULL;
 static lv_obj_t *scr_calibration = NULL;
 static lv_obj_t *scr_data = NULL;
 static lv_obj_t *scr_system = NULL;
+static lv_obj_t *scr_integration = NULL;
 static lv_obj_t *scr_shunt_calibration = NULL;
 static lv_obj_t *scr_shunt_standard = NULL;
 static lv_obj_t *scr_known_load = NULL;
@@ -157,6 +161,11 @@ static void to_data(lv_event_t *e) {
 static void to_system(lv_event_t *e) {
   (void)e;
   if (scr_system) lv_screen_load(scr_system);
+}
+
+static void to_integration(lv_event_t *e) {
+  (void)e;
+  if (scr_integration) lv_screen_load(scr_integration);
 }
 
 static void to_shunt_calibration(lv_event_t *e) {
@@ -1329,6 +1338,7 @@ static void build_settings_home(void) {
   add_category_row(scr_settings_home, "Measurement  >", y, to_measurement);   y += LIST_ITEM_H + GAP;
   add_category_row(scr_settings_home, "Calibration  >", y, to_calibration);   y += LIST_ITEM_H + GAP;
   add_category_row(scr_settings_home, "Data  >",        y, to_data);          y += LIST_ITEM_H + GAP;
+  add_category_row(scr_settings_home, "Integration  >", y, to_integration);   y += LIST_ITEM_H + GAP;
   add_category_row(scr_settings_home, "System  >",     y, to_system);
 }
 
@@ -1504,6 +1514,45 @@ static void build_system(void) {
   lv_obj_set_pos(info, MARGIN, HEADER_H + GAP);
 }
 
+/* ─── Screen: Integration (VE.Direct, UART info) ─── */
+static void vedirect_switch_cb(lv_event_t *e) {
+  lv_obj_t *sw = (lv_obj_t *)lv_event_get_target(e);
+  bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+  set_vedirect_enabled(on);
+}
+
+static void build_integration(void) {
+  scr_integration = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr_integration, lv_color_hex(COL_BG), 0);
+  lv_obj_remove_flag(scr_integration, LV_OBJ_FLAG_SCROLLABLE);
+
+  add_header_back_to_settings(scr_integration, "Integration");
+
+  lv_coord_t y = HEADER_H + GAP;
+
+  /* VE.Direct row: label + switch */
+  lv_obj_t *row_ve = lv_btn_create(scr_integration);
+  lv_obj_set_size(row_ve, DISP_W - 2 * MARGIN, LIST_ITEM_H);
+  lv_obj_set_pos(row_ve, MARGIN, y);
+  lv_obj_set_style_radius(row_ve, CARD_R, 0);
+  lv_obj_set_style_bg_color(row_ve, lv_color_hex(COL_CARD), 0);
+  lv_obj_t *lbl_ve = lv_label_create(row_ve);
+  lv_label_set_text(lbl_ve, "VE.Direct");
+  lv_obj_set_style_text_color(lbl_ve, lv_color_hex(COL_TEXT), 0);
+  lv_obj_set_pos(lbl_ve, PAD, (LIST_ITEM_H - 14) / 2);
+  lv_obj_t *sw = lv_switch_create(row_ve);
+  lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -PAD, 0);
+  if (get_vedirect_enabled())
+    lv_obj_add_state(sw, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(sw, vedirect_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  y += LIST_ITEM_H + GAP;
+
+  /* UART info (read-only) */
+  char uart_buf[64];
+  TelemetryVictronGetUartInfo(uart_buf, sizeof(uart_buf));
+  add_setting_row(scr_integration, "UART", uart_buf, y, NULL);
+}
+
 /* ─── Sensor update timer: only update value labels, no redraw ─── */
 static void update_timer_cb(lv_timer_t *timer) {
   (void)timer;
@@ -1596,6 +1645,7 @@ void ui_lvgl_init(void) {
   build_calc_mv();
   build_data();
   build_system();
+  build_integration();
 
   lv_screen_load(scr_monitor);
 
