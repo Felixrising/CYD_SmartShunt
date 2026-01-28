@@ -146,7 +146,7 @@ ESP32 SCL (GPIO27) ---------------> INA228 SCL
 
 ![INA228 module with onboard R002 shunt resistor (suited to lower/medium on‑board currents)](images/ina228-r002.webp)
 
-![Optional external FL‑2C DC shunt resistor block for higher currents](images/DCShunt_resistor_FL-2C_0.5C_10-600A.webp)
+![Optional external FL‑2C DC shunt resistor block for higher currents](images/DCShunt_Resistor_FL-2C_0.5C_10-600A.webp)
 
 ## Hardware links (affiliate)
 
