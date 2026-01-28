@@ -90,11 +90,63 @@ pio device monitor
 This project is designed around a **high‑side shunt** (in the positive line), which is how the INA228/226/219 devices are intended to be used in the default configuration.  
 You can also use the same hardware **low‑side** (in the negative return), but be aware of the different ground‑reference and noise implications in your system.
 
-> Replace the image paths below with your own photos/diagrams placed in an `images/` folder in the repo.
+**High‑side FL‑2C + INA228 (recommended)**
 
-![CYD Smart Shunt wiring – high side](images/cyd-smart-shunt-high-side.png)
+```text
+High current path (thick cable)
 
-![CYD Smart Shunt wiring – module + external shunt](images/cyd-smart-shunt-module-external-shunt.png)
+BATTERY +  ────────[  FL-2C SHUNT  ]────────  LOAD / FUSE BLOCK +
+BATTERY -  ─────────────────────────────────  LOAD / FUSE BLOCK -
+
+INA228 sense wiring (thin wires)
+
+Because VBUS is tied to VIN+ on this design:
+
+INA228 VIN+  ───────────────>  Shunt BATTERY side  (Kelvin sense)
+INA228 VIN-  ───────────────>  Shunt LOAD side     (Kelvin sense)
+INA228 VBUS  ──(tied to VIN+)─> same as VIN+
+
+INA228 ↔ ESP32 (CN1 / I2C)
+
+ESP32 3.3V  ───────────────>  INA228 VCC
+ESP32 GND   ───────────────>  INA228 GND  ───────> Battery -
+ESP32 IO22  (SDA) ─────────>  INA228 SDA
+ESP32 IO27  (SCL) ─────────>  INA228 SCL
+INA228 ALE  ───────────────>  (optional / leave unconnected)
+```
+
+**Combined view (high‑side shunt + sense + I2C)**
+
+```text
+            (THICK / HIGH CURRENT)
+
+BAT+ -----> [  FL-2C SHUNT  ] -----> LOAD+
+            |             |
+           (A)           (B)
+
+BAT- ------------------------------> LOAD-
+
+
+            (THIN / SENSE WIRES)
+
+INA228 VIN+  ---------------------> (A)  shunt battery side sense
+INA228 VIN-  ---------------------> (B)  shunt load side sense
+INA228 VBUS  ---- tied to VIN+ ---> (A)
+
+
+            (THIN / I2C + POWER)
+
+ESP32 3V3  -----------------------> INA228 VCC
+ESP32 GND  -----------------------> INA228 GND ---------> BAT-
+ESP32 SDA (GPIO22) ---------------> INA228 SDA
+ESP32 SCL (GPIO27) ---------------> INA228 SCL
+```
+
+![CYD ESP32‑2432S028R module with 2.8\" ILI9341 + XPT2046 touchscreen](images/cyd.webp)
+
+![INA228 module with onboard R002 shunt resistor (suited to lower/medium on‑board currents)](images/ina228-r002.webp)
+
+![Optional external FL‑2C DC shunt resistor block for higher currents](images/DCShunt Resistor FL-2C_0.5C_10-600A.webp)
 
 ## Hardware links (affiliate)
 
