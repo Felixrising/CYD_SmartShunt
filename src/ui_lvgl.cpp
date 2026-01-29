@@ -1990,16 +1990,6 @@ void ui_lvgl_poll(void) {
   lv_tick_inc(now - last);
   last = now;
   lv_timer_handler();
-} left of lv_timer_handler
-
-void ui_history_clear(void) {
-  s_history_write_idx = 0;
-  s_history_count = 0;
-}
-
-void ui_history_clear(void) {
-  s_history_write_idx = 0;
-  s_history_count = 0;
 }
 
 void ui_history_clear(void) {
