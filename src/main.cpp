@@ -181,7 +181,7 @@ void setup() {
   // Initialize current/power sensor (INA228 or other INA* via sensor abstraction)
   Serial.println("Initializing sensor...");
   if (!SensorBegin()) {
-    Serial.println("Sensor not found - dashboard will show \"Not connected\".");
+    Serial.println("Sensor not found - dashboard will show \"N/C\".");
   } else {
     Serial.print(SensorGetDriverName());
     Serial.println(" connected!");
@@ -486,7 +486,7 @@ void drawSettingsScreen() {
   
   if (SensorIsConnected()) {
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    String info = String(SensorGetDriverName()) + " connected";
+    String info = String(SensorGetDriverName()) + " OK";
     tft.drawString(info, 10, 240, 1);
     
     // Show calibration status
@@ -495,7 +495,7 @@ void drawSettingsScreen() {
     tft.drawString(calibInfo, 10, 255, 1);
   } else {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("NOT CONNECTED", 10, 240, 1);
+    tft.drawString("N/C", 10, 240, 1);
   }
 }
 

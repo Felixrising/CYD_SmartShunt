@@ -59,8 +59,8 @@ pio device monitor
   - Alarms: over‑current / under‑voltage, configurable thresholds
   - Shunt calibration UX + persistence/versioning
 - **Victron SmartShunt–style integration**
-  - Serial output compatible with Victron‑style shunt telemetry
-  - BLE / GATT broadcasting in a format that *VictronConnect might be able to read*
+  - Serial output compatible with Victron‑style shunt telemetry (VE.Direct – in progress)
+  - Optional **generic** BLE / GATT telemetry for our own tools/apps (no SmartShunt emulation – Victron BLE uses AES‑CTR encryption)
 
 ## Pin reference
 

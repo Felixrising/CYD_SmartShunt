@@ -1589,7 +1589,7 @@ static void update_timer_cb(lv_timer_t *timer) {
       lv_label_set_text(label_power, "--");
       lv_label_set_text(label_energy, "--");
       lv_label_set_text(label_temp, "--");
-      snprintf(buf, sizeof(buf), "%s not connected", SensorGetDriverName());
+      snprintf(buf, sizeof(buf), "%s N/C", SensorGetDriverName());
       lv_label_set_text(label_status, buf);
       lv_obj_set_style_text_color(label_status, lv_color_hex(COL_ERROR), 0);
     }
