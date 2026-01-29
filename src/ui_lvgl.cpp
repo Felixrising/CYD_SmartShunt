@@ -79,7 +79,6 @@ static lv_obj_t *label_current = NULL;
 static lv_obj_t *label_voltage = NULL;
 static lv_obj_t *label_power = NULL;
 static lv_obj_t *label_energy = NULL;
-static lv_obj_t *label_temp = NULL;
 static lv_obj_t *label_status = NULL;
 static lv_obj_t *label_avg_val = NULL;
 static lv_obj_t *label_shunt_max = NULL;
@@ -94,6 +93,15 @@ static lv_obj_t *label_calc_mv_result = NULL;
 
 static uint8_t *draw_buf1 = NULL;
 static uint8_t *draw_buf2 = NULL;
+
+/* ─── History buffer for histogram (since start or last reset) ─── */
+#define HISTORY_LEN 256
+static float s_history_v[HISTORY_LEN];
+static float s_history_i[HISTORY_LEN];
+static float s_history_p[HISTORY_LEN];
+static float s_history_e[HISTORY_LEN];
+static uint16_t s_history_write_idx = 0;
+static uint16_t s_history_count = 0;  /* samples written so far */
 
 /* ─── Flush: swap RGB565 byte order for ILI9341, then push ─── */
 static void my_flush_cb(lv_display_t *d, const lv_area_t *area, uint8_t *px_map) {
@@ -188,10 +196,12 @@ static lv_obj_t *add_header(lv_obj_t *parent, const char *title, bool show_back)
   lv_obj_set_style_pad_all(bar, 0, 0);
   lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
-  lv_obj_t *tit = lv_label_create(bar);
-  lv_label_set_text(tit, title);
-  lv_obj_set_style_text_color(tit, lv_color_hex(COL_TEXT), 0);
-  lv_obj_align(tit, LV_ALIGN_LEFT_MID, MARGIN, 0);
+  if (title) {
+    lv_obj_t *tit = lv_label_create(bar);
+    lv_label_set_text(tit, title);
+    lv_obj_set_style_text_color(tit, lv_color_hex(COL_TEXT), 0);
+    lv_obj_align(tit, LV_ALIGN_LEFT_MID, MARGIN, 0);
+  }
 
   lv_obj_t *btn = lv_btn_create(bar);
   lv_obj_set_size(btn, BTN_W, BTN_H);
@@ -317,6 +327,7 @@ static void confirm_reset_energy_cb(lv_event_t *e) {
   lv_obj_t *msgbox = (lv_obj_t *)lv_event_get_user_data(e);
   if (msgbox) lv_msgbox_close(msgbox);
   resetEnergyAccumulation();
+  ui_history_clear();
   if (scr_data) lv_screen_load(scr_data);
 }
 
@@ -325,6 +336,7 @@ static void confirm_reset_energy_dashboard_cb(lv_event_t *e) {
   lv_obj_t *msgbox = (lv_obj_t *)lv_event_get_user_data(e);
   if (msgbox) lv_msgbox_close(msgbox);
   resetEnergyAccumulation();
+  ui_history_clear();
 }
 
 static void confirm_reset_cancel_cb(lv_event_t *e) {
@@ -355,6 +367,297 @@ static void show_reset_energy_confirm_from_dashboard(lv_event_t *e) {
   lv_obj_set_style_bg_color(btn_reset, lv_color_hex(COL_ERROR), 0);
   lv_obj_add_event_cb(btn_cancel, confirm_reset_cancel_cb, LV_EVENT_CLICKED, msgbox);
   lv_obj_add_event_cb(btn_reset,  confirm_reset_energy_dashboard_cb, LV_EVENT_CLICKED, msgbox);
+}
+
+/* ─── History histogram popup (short tap on V/I/P/E) ─── */
+typedef enum { HIST_V = 0, HIST_I = 1, HIST_P = 2, HIST_E = 3 } hist_metric_t;
+
+#define HIST_PAN_HOLD_MS 30000  /* after 30s no input, resume auto-scroll */
+
+typedef struct {
+  lv_obj_t *modal;
+  lv_obj_t *chart;
+  lv_chart_series_t *series;
+  int32_t chart_data[HISTORY_LEN];
+  hist_metric_t metric;
+  uint8_t zoom;      /* 1, 2, 4 */
+  uint16_t scroll;   /* start index */
+  int32_t last_x;
+  bool user_has_panned_or_zoomed;
+  unsigned long last_user_action_time;
+} hist_popup_t;
+
+static hist_popup_t *s_active_hist_popup = NULL;  /* non-NULL while popup is open */
+
+/* Map logical index (0=oldest) to circular buffer physical index */
+static uint16_t hist_phys_idx(uint16_t logical) {
+  if (s_history_count < HISTORY_LEN)
+    return logical;  /* not wrapped yet */
+  return (s_history_write_idx + logical) % HISTORY_LEN;
+}
+
+/* Clamp to int32 range to avoid overflow and LVGL issues */
+static int32_t clamp_chart_val(int32_t v) {
+  if (v > 2000000000) return 2000000000;
+  if (v < -2000000000) return -2000000000;
+  return v;
+}
+
+static int32_t safe_scale(float v, float scale) {
+  if (isnan(v) || isinf(v)) return 0;
+  double d = (double)v * (double)scale;
+  if (d > 2000000000.0) return 2000000000;
+  if (d < -2000000000.0) return -2000000000;
+  return (int32_t)d;
+}
+
+#define HIST_CHART_MAX_POINTS 128  /* some LVGL builds cap chart points */
+static void hist_refresh_chart(hist_popup_t *hp) {
+  if (!hp || !hp->chart || !hp->series) return;
+  uint16_t pts = HISTORY_LEN / hp->zoom;
+  if (pts < 4) pts = 4;
+  if (pts > HIST_CHART_MAX_POINTS) pts = HIST_CHART_MAX_POINTS;
+  uint16_t max_scroll = (s_history_count > pts) ? (s_history_count - pts) : 0;
+  if (hp->scroll > max_scroll) hp->scroll = max_scroll;
+
+  float *src = NULL;
+  float scale = 1.0f;
+  switch (hp->metric) {
+    case HIST_V: src = s_history_v; scale = 1000.0f; break;  /* mV */
+    case HIST_I: src = s_history_i; scale = 1000.0f; break;  /* mA */
+    case HIST_P: src = s_history_p; scale = 1.0f; break;
+    case HIST_E: src = s_history_e; scale = 1.0f; break;    /* Wh (avoid int32 overflow with scale 10) */
+  }
+  if (!src) return;
+
+  float vmin = 1e9f, vmax = -1e9f;
+  for (uint16_t i = 0; i < pts; i++) {
+    if (hp->scroll + i >= s_history_count) continue;
+    uint16_t idx = hist_phys_idx(hp->scroll + i);
+    float v = src[idx];
+    if (isnan(v) || isinf(v)) continue;
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  if (vmin > vmax) { vmin = 0; vmax = 100; }
+  float margin = (vmax - vmin) * 0.05f;
+  if (margin < 0.001f) margin = 0.001f;
+  int32_t ymin = safe_scale(vmin - margin, scale);
+  int32_t ymax = safe_scale(vmax + margin, scale);
+  if (ymin >= ymax) ymax = ymin + 1;
+
+  lv_chart_set_range(hp->chart, LV_CHART_AXIS_PRIMARY_Y, clamp_chart_val(ymin), clamp_chart_val(ymax));
+  lv_chart_set_point_count(hp->chart, pts);
+  lv_chart_set_x_start_point(hp->chart, hp->series, 0);
+
+  for (uint16_t i = 0; i < pts; i++) {
+    int32_t val = ymin;
+    if (hp->scroll + i < s_history_count) {
+      uint16_t idx = hist_phys_idx(hp->scroll + i);
+      val = safe_scale(src[idx], scale);
+    }
+    lv_chart_set_value_by_id(hp->chart, hp->series, i, clamp_chart_val(val));
+  }
+  lv_chart_refresh(hp->chart);
+}
+
+static void hist_mark_user_action(hist_popup_t *hp) {
+  if (hp) {
+    hp->user_has_panned_or_zoomed = true;
+    hp->last_user_action_time = (unsigned long)millis();
+  }
+}
+
+/** Apply scroll policy when new data arrives: auto-scroll by default; if user panned/zoomed, hold for 30s unless already at newest (then keep following). */
+static void hist_apply_scroll_policy_and_refresh(hist_popup_t *hp) {
+  if (!hp || !hp->chart || !hp->series) return;
+  uint16_t pts = HISTORY_LEN / hp->zoom;
+  if (pts < 4) pts = 4;
+  if (pts > HIST_CHART_MAX_POINTS) pts = HIST_CHART_MAX_POINTS;
+  uint16_t max_scroll = (s_history_count > pts) ? (s_history_count - pts) : 0;
+  /* previous max (before this sample): if user was at this, they were "at newest" and we keep following */
+  uint16_t max_scroll_prev = (s_history_count > pts && s_history_count > 0) ? (s_history_count - 1 - pts) : 0;
+  unsigned long now = (unsigned long)millis();
+
+  if (!hp->user_has_panned_or_zoomed) {
+    hp->scroll = max_scroll;  /* default: follow newest */
+  } else if (hp->scroll >= max_scroll_prev) {
+    /* user had panned to the right (was at newest); keep following new data */
+    hp->scroll = max_scroll;
+  } else if ((now - hp->last_user_action_time) < (unsigned long)HIST_PAN_HOLD_MS) {
+    /* user panned/zoomed and is viewing older data; hold position for 30s */
+    /* hp->scroll unchanged */
+  } else {
+    /* 30s passed with no input; resume auto-scroll */
+    hp->user_has_panned_or_zoomed = false;
+    hp->scroll = max_scroll;
+  }
+
+  hist_refresh_chart(hp);
+}
+
+static void hist_zoom_plus_cb(lv_event_t *e) {
+  hist_popup_t *hp = (hist_popup_t *)lv_event_get_user_data(e);
+  hist_mark_user_action(hp);
+  if (hp->zoom < 4) { hp->zoom *= 2; hist_refresh_chart(hp); }
+}
+
+static void hist_zoom_minus_cb(lv_event_t *e) {
+  hist_popup_t *hp = (hist_popup_t *)lv_event_get_user_data(e);
+  hist_mark_user_action(hp);
+  if (hp->zoom > 1) { hp->zoom /= 2; hist_refresh_chart(hp); }
+}
+
+static void hist_scroll_left_cb(lv_event_t *e) {
+  hist_popup_t *hp = (hist_popup_t *)lv_event_get_user_data(e);
+  hist_mark_user_action(hp);
+  uint16_t pts = HISTORY_LEN / hp->zoom;
+  if (hp->scroll + pts < s_history_count) hp->scroll += pts / 4;
+  if (hp->scroll + pts > s_history_count) hp->scroll = (s_history_count > pts) ? (s_history_count - pts) : 0;
+  hist_refresh_chart(hp);
+}
+
+static void hist_scroll_right_cb(lv_event_t *e) {
+  hist_popup_t *hp = (hist_popup_t *)lv_event_get_user_data(e);
+  hist_mark_user_action(hp);
+  if (hp->scroll >= 16) hp->scroll -= 16; else hp->scroll = 0;
+  hist_refresh_chart(hp);
+}
+
+static void hist_modal_deleted_cb(lv_event_t *e) {
+  (void)e;
+  s_active_hist_popup = NULL;
+}
+
+static void hist_close_cb(lv_event_t *e) {
+  hist_popup_t *hp = (hist_popup_t *)lv_event_get_user_data(e);
+  s_active_hist_popup = NULL;
+  if (hp && hp->modal) lv_obj_delete(hp->modal);
+}
+
+static void hist_chart_gesture_cb(lv_event_t *e) {
+  hist_popup_t *hp = (hist_popup_t *)lv_event_get_user_data(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_PRESSING) {
+    hist_mark_user_action(hp);
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    int32_t dx = p.x - hp->last_x;
+    hp->last_x = p.x;
+    uint16_t pts = HISTORY_LEN / hp->zoom;
+    if (dx > 8) { /* swipe right = scroll to older */
+      if (hp->scroll + pts < s_history_count) hp->scroll += 4;
+      if (hp->scroll + pts > s_history_count) hp->scroll = (s_history_count > pts) ? (s_history_count - pts) : 0;
+      hist_refresh_chart(hp);
+    } else if (dx < -8) { /* swipe left = scroll to newer */
+      if (hp->scroll >= 4) hp->scroll -= 4; else hp->scroll = 0;
+      hist_refresh_chart(hp);
+    }
+  } else if (code == LV_EVENT_PRESSED) {
+    lv_indev_t *indev = lv_indev_get_act();
+    if (indev) { lv_point_t p; lv_indev_get_point(indev, &p); hp->last_x = p.x; }
+  }
+}
+
+static void show_history_popup(hist_metric_t metric) {
+  static hist_popup_t hp;
+  hp.metric = metric;
+  hp.zoom = 1;
+  /* Start at newest (same as max_scroll so graph scrolls with new data by default) */
+  {
+    uint16_t pts = HISTORY_LEN / hp.zoom;
+    if (pts > HIST_CHART_MAX_POINTS) pts = HIST_CHART_MAX_POINTS;
+    hp.scroll = (s_history_count > pts) ? (s_history_count - pts) : 0;
+  }
+  hp.last_x = 0;
+  hp.user_has_panned_or_zoomed = false;  /* start in auto-scroll mode */
+  hp.last_user_action_time = 0;
+  s_active_hist_popup = &hp;
+
+  const char *titles[] = { "Voltage", "Current", "Power", "Energy" };
+  const char *units[] = { "V", "A", "W", "Wh" };
+
+  hp.modal = lv_obj_create(lv_screen_active());
+  lv_obj_set_size(hp.modal, DISP_W - 2 * MARGIN, DISP_H - 2 * MARGIN);
+  lv_obj_align(hp.modal, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_bg_color(hp.modal, lv_color_hex(COL_CARD), 0);
+  lv_obj_set_style_radius(hp.modal, CARD_R, 0);
+  lv_obj_set_style_pad_all(hp.modal, PAD, 0);
+  lv_obj_clear_flag(hp.modal, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(hp.modal, LV_OBJ_FLAG_CLICKABLE);  /* absorb taps so they don't pass through to monitor */
+  lv_obj_add_event_cb(hp.modal, hist_modal_deleted_cb, LV_EVENT_DELETE, NULL);
+
+  lv_obj_t *tit = lv_label_create(hp.modal);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%s history (%s)", titles[metric], units[metric]);
+  lv_label_set_text(tit, buf);
+  lv_obj_set_style_text_color(tit, lv_color_hex(COL_ACCENT), 0);
+  lv_obj_set_pos(tit, 0, 0);
+
+  lv_coord_t ch_h = 120;
+  hp.chart = lv_chart_create(hp.modal);
+  lv_obj_set_size(hp.chart, DISP_W - 2 * MARGIN - 2 * PAD, ch_h);
+  lv_obj_set_pos(hp.chart, 0, 24);
+  lv_obj_set_style_bg_color(hp.chart, lv_color_hex(COL_BG), 0);
+  lv_chart_set_type(hp.chart, LV_CHART_TYPE_LINE);
+  lv_chart_set_div_line_count(hp.chart, 2, 4);
+  hp.series = lv_chart_add_series(hp.chart, lv_color_hex(COL_ACCENT), LV_CHART_AXIS_PRIMARY_Y);
+  lv_obj_add_flag(hp.chart, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scroll_dir(hp.chart, LV_DIR_NONE);
+  lv_obj_add_event_cb(hp.chart, hist_chart_gesture_cb, LV_EVENT_PRESSING, &hp);
+  lv_obj_add_event_cb(hp.chart, hist_chart_gesture_cb, LV_EVENT_PRESSED, &hp);
+
+  lv_obj_t *btn_row = lv_obj_create(hp.modal);
+  lv_obj_set_size(btn_row, DISP_W - 2 * MARGIN - 2 * PAD, 36);
+  lv_obj_set_pos(btn_row, 0, 24 + ch_h + GAP);
+  lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *btn_minus = lv_btn_create(btn_row);
+  lv_obj_set_size(btn_minus, 40, 28);
+  lv_obj_t *lbl = lv_label_create(btn_minus);
+  lv_label_set_text(lbl, "-");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn_minus, hist_zoom_minus_cb, LV_EVENT_CLICKED, &hp);
+
+  lv_obj_t *btn_plus = lv_btn_create(btn_row);
+  lv_obj_set_size(btn_plus, 40, 28);
+  lbl = lv_label_create(btn_plus);
+  lv_label_set_text(lbl, "+");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn_plus, hist_zoom_plus_cb, LV_EVENT_CLICKED, &hp);
+
+  lv_obj_t *btn_left = lv_btn_create(btn_row);
+  lv_obj_set_size(btn_left, 40, 28);
+  lbl = lv_label_create(btn_left);
+  lv_label_set_text(lbl, "<");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn_left, hist_scroll_right_cb, LV_EVENT_CLICKED, &hp);  /* < = older = decrease scroll */
+
+  lv_obj_t *btn_right = lv_btn_create(btn_row);
+  lv_obj_set_size(btn_right, 40, 28);
+  lbl = lv_label_create(btn_right);
+  lv_label_set_text(lbl, ">");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn_right, hist_scroll_left_cb, LV_EVENT_CLICKED, &hp);  /* > = newer = increase scroll */
+
+  lv_obj_t *btn_close = lv_btn_create(btn_row);
+  lv_obj_set_size(btn_close, 56, 28);
+  lbl = lv_label_create(btn_close);
+  lv_label_set_text(lbl, "Close");
+  lv_obj_center(lbl);
+  lv_obj_add_event_cb(btn_close, hist_close_cb, LV_EVENT_CLICKED, &hp);
+
+  hist_refresh_chart(&hp);
+}
+
+static void hist_card_click_cb(lv_event_t *e) {
+  hist_metric_t m = (hist_metric_t)(intptr_t)lv_event_get_user_data(e);
+  show_history_popup(m);
 }
 
 /* ─── Calibration: confirm then run legacy full-screen flow (TFT take-over is intentional) ─── */
@@ -1236,19 +1539,19 @@ static void build_monitor(void) {
   lv_obj_set_style_bg_color(scr_monitor, lv_color_hex(COL_BG), 0);
   lv_obj_remove_flag(scr_monitor, LV_OBJ_FLAG_SCROLLABLE);
 
-  lv_obj_t *hdr = add_header(scr_monitor, "Smart Shunt", false);  /* Settings on right */
-  /* INA connection status in header (right side, before Settings button) */
+  lv_obj_t *hdr = add_header(scr_monitor, NULL, false);  /* No static title; status shows "SmartShunt INA228 27.8C" */
   label_status = lv_label_create(hdr);
-  lv_label_set_text(label_status, "--");
+  lv_label_set_text(label_status, "CYD SmartShunt INA? N/A");
   lv_obj_set_style_text_color(label_status, lv_color_hex(COL_MUTED), 0);
-  lv_obj_set_width(label_status, 150);
+  lv_obj_set_width(label_status, DISP_W - 2 * MARGIN - BTN_W - GAP);
   lv_label_set_long_mode(label_status, LV_LABEL_LONG_CLIP);
-  lv_obj_align(label_status, LV_ALIGN_RIGHT_MID, -(MIN_TAP_W + PAD), 0);
+  lv_obj_align(label_status, LV_ALIGN_LEFT_MID, MARGIN, 0);
 
   lv_coord_t top = HEADER_H + GAP;
   lv_coord_t half = (DISP_W - 2 * MARGIN - GAP) / 2;
   lv_coord_t card_w = half;
-  lv_coord_t card_h = 72;
+  /* Split remaining height in half (row 1 + row 2), leave MARGIN at bottom like sides */
+  lv_coord_t card_h = (DISP_H - HEADER_H - 2 * GAP - MARGIN) / 2;
 
   /* Primary cards: Current, Voltage */
   lv_obj_t *card_i = lv_obj_create(scr_monitor);
@@ -1257,6 +1560,8 @@ static void build_monitor(void) {
   lv_obj_set_style_bg_color(card_i, lv_color_hex(COL_CARD), 0);
   lv_obj_set_style_radius(card_i, CARD_R, 0);
   lv_obj_remove_flag(card_i, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(card_i, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(card_i, hist_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)HIST_I);
   lv_obj_t *lbl_i = lv_label_create(card_i);
   lv_label_set_text(lbl_i, "Current");
   lv_obj_set_style_text_color(lbl_i, lv_color_hex(COL_MUTED), 0);
@@ -1275,6 +1580,8 @@ static void build_monitor(void) {
   lv_obj_set_style_bg_color(card_v, lv_color_hex(COL_CARD), 0);
   lv_obj_set_style_radius(card_v, CARD_R, 0);
   lv_obj_remove_flag(card_v, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(card_v, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(card_v, hist_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)HIST_V);
   lv_obj_t *lbl_v = lv_label_create(card_v);
   lv_label_set_text(lbl_v, "Voltage");
   lv_obj_set_style_text_color(lbl_v, lv_color_hex(COL_MUTED), 0);
@@ -1288,42 +1595,50 @@ static void build_monitor(void) {
 #endif
 
   top += card_h + GAP;
-  /* Secondary: Power + Energy on the same line (half width each), then Temp full width */
+  /* Secondary: Power + Energy – same card layout as Current/Voltage (label top, value below), white value text */
   {
-    lv_obj_t *row_p = lv_btn_create(scr_monitor);
-    lv_obj_set_size(row_p, half, ROW_H);
-    lv_obj_set_pos(row_p, MARGIN, top);
-    lv_obj_set_style_radius(row_p, CARD_R, 0);
-    lv_obj_set_style_bg_color(row_p, lv_color_hex(COL_CARD), 0);
-    lv_obj_clear_flag(row_p, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *lbl = lv_label_create(row_p);
+    lv_obj_t *card_p = lv_btn_create(scr_monitor);
+    lv_obj_set_size(card_p, card_w, card_h);
+    lv_obj_set_pos(card_p, MARGIN, top);
+    lv_obj_set_style_radius(card_p, CARD_R, 0);
+    lv_obj_set_style_bg_color(card_p, lv_color_hex(COL_CARD), 0);
+    lv_obj_clear_flag(card_p, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(card_p, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card_p, hist_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)HIST_P);
+    lv_obj_t *lbl = lv_label_create(card_p);
     lv_label_set_text(lbl, "Power");
     lv_obj_set_style_text_color(lbl, lv_color_hex(COL_MUTED), 0);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, PAD, 0);
-    label_power = lv_label_create(row_p);
+    lv_obj_set_pos(lbl, PAD, 2);
+    label_power = lv_label_create(card_p);
     lv_label_set_text(label_power, "0.0 W");
     lv_obj_set_style_text_color(label_power, lv_color_hex(COL_TEXT), 0);
-    lv_obj_align(label_power, LV_ALIGN_RIGHT_MID, -PAD, 0);
+    lv_obj_set_pos(label_power, PAD, 22);
+#if LV_FONT_MONTSERRAT_20
+    lv_obj_set_style_text_font(label_power, &lv_font_montserrat_20, 0);
+#endif
   }
   {
-    lv_obj_t *row_e = lv_btn_create(scr_monitor);
-    lv_obj_set_size(row_e, half, ROW_H);
-    lv_obj_set_pos(row_e, MARGIN + half + GAP, top);
-    lv_obj_set_style_radius(row_e, CARD_R, 0);
-    lv_obj_set_style_bg_color(row_e, lv_color_hex(COL_CARD), 0);
-    lv_obj_clear_flag(row_e, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *lbl = lv_label_create(row_e);
+    lv_obj_t *card_e = lv_btn_create(scr_monitor);
+    lv_obj_set_size(card_e, card_w, card_h);
+    lv_obj_set_pos(card_e, MARGIN + card_w + GAP, top);
+    lv_obj_set_style_radius(card_e, CARD_R, 0);
+    lv_obj_set_style_bg_color(card_e, lv_color_hex(COL_CARD), 0);
+    lv_obj_clear_flag(card_e, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(card_e, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card_e, hist_card_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)HIST_E);
+    lv_obj_add_event_cb(card_e, show_reset_energy_confirm_from_dashboard, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_t *lbl = lv_label_create(card_e);
     lv_label_set_text(lbl, "Energy");
     lv_obj_set_style_text_color(lbl, lv_color_hex(COL_MUTED), 0);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, PAD, 0);
-    label_energy = lv_label_create(row_e);
+    lv_obj_set_pos(lbl, PAD, 2);
+    label_energy = lv_label_create(card_e);
     lv_label_set_text(label_energy, "0.0 Wh");
     lv_obj_set_style_text_color(label_energy, lv_color_hex(COL_TEXT), 0);
-    lv_obj_align(label_energy, LV_ALIGN_RIGHT_MID, -PAD, 0);
-    lv_obj_add_event_cb(row_e, show_reset_energy_confirm_from_dashboard, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_set_pos(label_energy, PAD, 22);
+#if LV_FONT_MONTSERRAT_20
+    lv_obj_set_style_text_font(label_energy, &lv_font_montserrat_20, 0);
+#endif
   }
-  top += ROW_H + GAP;
-  label_temp = add_setting_row(scr_monitor, "Temp", "0.0 \xC2\xB0""C", top, NULL); top += ROW_H + GAP;
 }
 
 /* ─── Screen 2: Settings home (category list) ─── */
@@ -1553,6 +1868,16 @@ static void build_integration(void) {
   add_setting_row(scr_integration, "UART", uart_buf, y, NULL);
 }
 
+/* ─── History push (called from update_timer) ─── */
+static void history_push(float v, float i, float p, double e) {
+  s_history_v[s_history_write_idx] = v;
+  s_history_i[s_history_write_idx] = i;
+  s_history_p[s_history_write_idx] = (float)p;
+  s_history_e[s_history_write_idx] = (float)e;
+  s_history_write_idx = (s_history_write_idx + 1) % HISTORY_LEN;
+  if (s_history_count < HISTORY_LEN) s_history_count++;
+}
+
 /* ─── Sensor update timer: only update value labels, no redraw ─── */
 static void update_timer_cb(lv_timer_t *timer) {
   (void)timer;
@@ -1563,8 +1888,13 @@ static void update_timer_cb(lv_timer_t *timer) {
   float temperature = SensorGetTemperature();
   bool  connected   = SensorIsConnected();
 
-  if (label_current && label_voltage && label_power && label_energy && label_temp && label_status) {
-    char buf[32];
+  history_push(voltage, current, power, energy);
+
+  if (s_active_hist_popup)
+    hist_apply_scroll_policy_and_refresh(s_active_hist_popup);
+
+  if (label_current && label_voltage && label_power && label_energy && label_status) {
+    char buf[48];
     if (connected) {
       snprintf(buf, sizeof(buf), "%.3f A", (double)current);
       lv_label_set_text(label_current, buf);
@@ -1577,10 +1907,7 @@ static void update_timer_cb(lv_timer_t *timer) {
       else
         snprintf(buf, sizeof(buf), "%.1f Wh", (double)energy);
       lv_label_set_text(label_energy, buf);
-      /* ASCII-only units for clarity on embedded fonts */
-      snprintf(buf, sizeof(buf), "%.1f degC", (double)temperature);
-      lv_label_set_text(label_temp, buf);
-      snprintf(buf, sizeof(buf), "%s OK", SensorGetDriverName());
+      snprintf(buf, sizeof(buf), "CYD SmartShunt %s %.1fC", SensorGetDriverName(), (double)temperature);
       lv_label_set_text(label_status, buf);
       lv_obj_set_style_text_color(label_status, lv_color_hex(COL_MUTED), 0);
     } else {
@@ -1588,8 +1915,7 @@ static void update_timer_cb(lv_timer_t *timer) {
       lv_label_set_text(label_voltage, "--");
       lv_label_set_text(label_power, "--");
       lv_label_set_text(label_energy, "--");
-      lv_label_set_text(label_temp, "--");
-      snprintf(buf, sizeof(buf), "%s N/C", SensorGetDriverName());
+      snprintf(buf, sizeof(buf), "CYD SmartShunt INA? N/A");
       lv_label_set_text(label_status, buf);
       lv_obj_set_style_text_color(label_status, lv_color_hex(COL_ERROR), 0);
     }
@@ -1664,4 +1990,19 @@ void ui_lvgl_poll(void) {
   lv_tick_inc(now - last);
   last = now;
   lv_timer_handler();
+} left of lv_timer_handler
+
+void ui_history_clear(void) {
+  s_history_write_idx = 0;
+  s_history_count = 0;
+}
+
+void ui_history_clear(void) {
+  s_history_write_idx = 0;
+  s_history_count = 0;
+}
+
+void ui_history_clear(void) {
+  s_history_write_idx = 0;
+  s_history_count = 0;
 }
