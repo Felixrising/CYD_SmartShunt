@@ -1,7 +1,8 @@
 /**
  * @file ui_lvgl.cpp
- * LVGL UI for CYD Smart Shunt — UX spec: 8px grid, 32px header, min tap 44×28, category list.
+ * LVGL UI for CYD Smart Shunt. UX spec: 8px grid, 32px header, min tap 44x28, category list.
  * Design: black BG, dark grey cards, cyan accent, flat containers, left label / right value.
+ * Note: Use ASCII only for label text on the display; extended/Unicode characters show as a box.
  */
 #include "ui_lvgl.h"
 #include "touch.h"
@@ -30,10 +31,10 @@ extern void set_vedirect_enabled(bool on);
 #define DISP_W    320
 #define DISP_H    240
 #define GRID      8
-#define MARGIN    8
+#define MARGIN    4
 #define MARGIN_L  16
-#define GAP       8
-#define PAD       8
+#define GAP       4
+#define PAD       4
 #define HEADER_H  32
 #define MIN_TAP_W 44
 #define MIN_TAP_H 28
@@ -373,11 +374,17 @@ static void show_reset_energy_confirm_from_dashboard(lv_event_t *e) {
 typedef enum { HIST_V = 0, HIST_I = 1, HIST_P = 2, HIST_E = 3 } hist_metric_t;
 
 #define HIST_PAN_HOLD_MS 30000  /* after 30s no input, resume auto-scroll */
+#define HIST_TITLE_H    28
+#define HIST_SCALE_H    18
+#define HIST_BTN_ROW_H  36
 
 typedef struct {
   lv_obj_t *modal;
+  lv_obj_t *graph_container;  /* chart + scale label + button row */
   lv_obj_t *chart;
   lv_chart_series_t *series;
+  lv_obj_t *label_scale;       /* Y range e.g. "11.8 - 12.5 V" */
+  const char *unit;            /* "V", "A", "W", "Wh" */
   int32_t chart_data[HISTORY_LEN];
   hist_metric_t metric;
   uint8_t zoom;      /* 1, 2, 4 */
@@ -450,6 +457,7 @@ static void hist_refresh_chart(hist_popup_t *hp) {
   lv_chart_set_point_count(hp->chart, pts);
   lv_chart_set_x_start_point(hp->chart, hp->series, 0);
 
+  /* Fill chart: left = oldest in window (scroll), right = newest (scroll+pts-1); new data appears from the right */
   for (uint16_t i = 0; i < pts; i++) {
     int32_t val = ymin;
     if (hp->scroll + i < s_history_count) {
@@ -459,6 +467,13 @@ static void hist_refresh_chart(hist_popup_t *hp) {
     lv_chart_set_value_by_id(hp->chart, hp->series, i, clamp_chart_val(val));
   }
   lv_chart_refresh(hp->chart);
+
+  /* Update Y-scale label (min - max unit). Use ASCII only: no extended/Unicode chars on LVGL display. */
+  if (hp->label_scale && hp->unit) {
+    char scale_buf[32];
+    snprintf(scale_buf, sizeof(scale_buf), "%.2f - %.2f %s", (double)vmin, (double)vmax, hp->unit);
+    lv_label_set_text(hp->label_scale, scale_buf);
+  }
 }
 
 static void hist_mark_user_action(hist_popup_t *hp) {
@@ -579,14 +594,18 @@ static void show_history_popup(hist_metric_t metric) {
   const char *titles[] = { "Voltage", "Current", "Power", "Energy" };
   const char *units[] = { "V", "A", "W", "Wh" };
 
+  /* History popup: modal (flex col) -> title, then graph area (scale, chart, buttons). Spacing uses GAP/GRID. */
   hp.modal = lv_obj_create(lv_screen_active());
   lv_obj_set_size(hp.modal, DISP_W - 2 * MARGIN, DISP_H - 2 * MARGIN);
   lv_obj_align(hp.modal, LV_ALIGN_CENTER, 0, 0);
   lv_obj_set_style_bg_color(hp.modal, lv_color_hex(COL_CARD), 0);
   lv_obj_set_style_radius(hp.modal, CARD_R, 0);
   lv_obj_set_style_pad_all(hp.modal, PAD, 0);
+  lv_obj_set_flex_flow(hp.modal, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(hp.modal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_row(hp.modal, GAP, 0);
   lv_obj_clear_flag(hp.modal, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(hp.modal, LV_OBJ_FLAG_CLICKABLE);  /* absorb taps so they don't pass through to monitor */
+  lv_obj_add_flag(hp.modal, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(hp.modal, hist_modal_deleted_cb, LV_EVENT_DELETE, NULL);
 
   lv_obj_t *tit = lv_label_create(hp.modal);
@@ -594,27 +613,50 @@ static void show_history_popup(hist_metric_t metric) {
   snprintf(buf, sizeof(buf), "%s history (%s)", titles[metric], units[metric]);
   lv_label_set_text(tit, buf);
   lv_obj_set_style_text_color(tit, lv_color_hex(COL_ACCENT), 0);
-  lv_obj_set_pos(tit, 0, 0);
+  lv_obj_set_height(tit, HIST_TITLE_H);
+  lv_obj_set_flex_grow(tit, 0);
 
-  lv_coord_t ch_h = 120;
-  hp.chart = lv_chart_create(hp.modal);
-  lv_obj_set_size(hp.chart, DISP_W - 2 * MARGIN - 2 * PAD, ch_h);
-  lv_obj_set_pos(hp.chart, 0, 24);
+  hp.unit = units[metric];
+  hp.graph_container = lv_obj_create(hp.modal);
+  lv_obj_set_width(hp.graph_container, lv_pct(100));
+  lv_obj_set_flex_grow(hp.graph_container, 1);
+  lv_obj_set_style_min_height(hp.graph_container, 120, 0);
+  lv_obj_set_flex_flow(hp.graph_container, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(hp.graph_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_bg_color(hp.graph_container, lv_color_hex(COL_BG), 0);
+  lv_obj_set_style_radius(hp.graph_container, CARD_R, 0);
+  lv_obj_set_style_pad_all(hp.graph_container, GAP, 0);
+  lv_obj_set_style_pad_row(hp.graph_container, GAP, 0);
+  lv_obj_clear_flag(hp.graph_container, LV_OBJ_FLAG_SCROLLABLE);
+
+  hp.label_scale = lv_label_create(hp.graph_container);
+  lv_label_set_text(hp.label_scale, "-");  /* placeholder; ASCII only for LVGL display */
+  lv_obj_set_style_text_color(hp.label_scale, lv_color_hex(COL_MUTED), 0);
+  lv_obj_set_style_text_font(hp.label_scale, &lv_font_montserrat_14, 0);
+  lv_obj_set_height(hp.label_scale, HIST_SCALE_H);
+  lv_obj_set_flex_grow(hp.label_scale, 0);
+
+  hp.chart = lv_chart_create(hp.graph_container);
+  lv_obj_set_width(hp.chart, lv_pct(100));
+  lv_obj_set_flex_grow(hp.chart, 1);
+  lv_obj_set_style_min_height(hp.chart, 80, 0);
   lv_obj_set_style_bg_color(hp.chart, lv_color_hex(COL_BG), 0);
   lv_chart_set_type(hp.chart, LV_CHART_TYPE_LINE);
-  lv_chart_set_div_line_count(hp.chart, 2, 4);
+  lv_chart_set_div_line_count(hp.chart, 4, 5);
   hp.series = lv_chart_add_series(hp.chart, lv_color_hex(COL_ACCENT), LV_CHART_AXIS_PRIMARY_Y);
   lv_obj_add_flag(hp.chart, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scroll_dir(hp.chart, LV_DIR_NONE);
   lv_obj_add_event_cb(hp.chart, hist_chart_gesture_cb, LV_EVENT_PRESSING, &hp);
   lv_obj_add_event_cb(hp.chart, hist_chart_gesture_cb, LV_EVENT_PRESSED, &hp);
 
-  lv_obj_t *btn_row = lv_obj_create(hp.modal);
-  lv_obj_set_size(btn_row, DISP_W - 2 * MARGIN - 2 * PAD, 36);
-  lv_obj_set_pos(btn_row, 0, 24 + ch_h + GAP);
+  lv_obj_t *btn_row = lv_obj_create(hp.graph_container);
+  lv_obj_set_width(btn_row, lv_pct(100));
+  lv_obj_set_height(btn_row, HIST_BTN_ROW_H);
+  lv_obj_set_flex_grow(btn_row, 0);
   lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_all(btn_row, 0, 0);
   lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *btn_minus = lv_btn_create(btn_row);
