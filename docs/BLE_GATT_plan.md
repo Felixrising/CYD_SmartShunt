@@ -1,31 +1,29 @@
-# BLE / GATT plan: Victron SmartShunt emulation
+# BLE / GATT plan (non‑Victron)
 
-**Goal:** Broadcast BLE/GATT in a format compatible with VictronConnect so the CYD Smart Shunt can be discovered and read as a Victron SmartShunt (e.g. for monitoring from a phone).
+**Important:** Victron SmartShunt BLE / Bluetooth advertising uses **AES‑CTR encryption**, so **emulating a SmartShunt over BLE or advertising in a way that VictronConnect will accept is not realistically possible** without Victron’s keys/protocol details. The notes below are kept only as a sketch for *generic* BLE telemetry, **not** for SmartShunt emulation.
 
-## Reference
+## Reference / constraints
 
-- Victron BLE protocol is documented for SmartShunt (firmware v2.31+); VictronConnect v5.42+ can enable and use it.
-- **Service UUID:** `65970000-4bda-4c1e-af4b-551c4cf74769`
-- Data is exposed as GATT characteristics (voltage, current, power, energy, SOC, etc.).
-- **Keep-alive:** Devices disconnect after ~1 minute without a keep-alive; the app must send periodic keep-alive messages.
-- Some devices also use BLE advertising (manufacturer data) for “instant readout”; protocol details may require Victron docs or reverse‑engineering (e.g. manufacturer data PDF, VictronConnect decompilation).
+- Victron **SmartShunt** BLE / advertising layer is encrypted (AES‑CTR); realistic emulation is off the table.
+- We can still use ESP32 BLE for **our own apps / tools** (custom mobile app, Home Assistant bridge, etc.).
+- Any BLE we add here should be treated as **generic telemetry**, not as a Victron‑compatible interface.
 
-## Tasks (planning only; no implementation yet)
+## Tasks (generic BLE telemetry – planning only)
 
 1. **Advertising**
-   - Advertise with Victron-like service UUID(s) and local name so VictronConnect can discover the device.
-   - Optionally include manufacturer-specific advertising data if required for SmartShunt compatibility.
+   - Advertise with a project‑specific name (e.g. `CYD Smart Shunt`).
+   - Optionally include simple, non‑encrypted manufacturer data for “instant glance” stats (voltage, current).
 
 2. **GATT service and characteristics**
-   - Implement the Victron BLE service (`65970000-4bda-4c1e-af4b-551c4cf74769`).
-   - Expose characteristics for at least: battery voltage, current, power, (optional) energy, SOC, temperature.
-   - Use data formats and units expected by VictronConnect (little-endian, mV/mA/0.1 Ah etc. as per protocol).
+   - Define our own GATT service UUID (not Victron’s) for shunt telemetry.
+   - Expose characteristics for at least: battery voltage, current, power, energy, SOC, temperature.
+   - Use straightforward binary formats (e.g. little‑endian integers in mV / mA / 0.1Ah) that are easy to parse.
 
-3. **Keep-alive**
-   - Document or implement the keep-alive mechanism so connected clients (e.g. VictronConnect) do not get disconnected after one minute.
+3. **Keep-alive / connection model**
+   - Decide between short, read‑only connections vs. longer sessions with a simple app‑level keep‑alive.
 
 4. **Optional: pairing / bonding**
-   - Decide whether to support pairing; some Victron devices use an encryption key obtainable from VictronConnect.
+   - Decide whether we need pairing (e.g. to prevent random phones from connecting) for **our own** app(s).
 
 5. **Integration settings**
    - Add “BLE” / “Bluetooth” toggle and optional device name on the Integration settings page (alongside VE.Direct).
@@ -33,9 +31,8 @@
 
 ## Dependencies
 
-- ESP32 BLE stack (BluetoothSerial and/or NimBLE/Bluedroid GATT server).
-- Reference: [Victron BLE protocol announcement](https://community.victronenergy.com/questions/93919/victron-bluetooth-ble-protocol-publication.html), [keshavdv/victron-ble](https://github.com/keshavdv/victron-ble), and any official Victron manufacturer data / GATT specification.
+- ESP32 BLE stack (NimBLE / Bluedroid GATT server).
 
 ## Status
 
-- **Planning only.** No BLE code in the repo yet; VE.Direct (serial) is implemented first. This document is the placeholder for BLE/GATT work when we start it.
+- **Planning only.** No BLE code in the repo yet. VE.Direct (serial) remains the primary integration path; BLE is optional and **will not attempt Victron SmartShunt emulation**.

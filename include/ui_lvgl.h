@@ -17,4 +17,7 @@ void ui_lvgl_on_touch_calibration_done(void);
 /** Call every ~5 ms from loop: advances LVGL tick and runs timer handler. */
 void ui_lvgl_poll(void);
 
+/** Clear history buffers (call when energy/data is reset). */
+void ui_history_clear(void);
+
 #endif /* UI_LVGL_H */
