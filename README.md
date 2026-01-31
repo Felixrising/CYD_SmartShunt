@@ -23,6 +23,8 @@ An ESP32 Cheap Yellow Display (CYD) based **DC current & voltage meter** with a 
 
 ![Settings screen – shunt calibration](images/CYD_Settings-Modified-INA228-50A_75mV.png)
 
+![Modified INA228 module: onboard R002 shunt and screw terminals removed; Kelvin sense wires extended to external 50A/75mV shunt](images/Modified-INA228-50A_75mV.png)
+
 ## Hardware
 
 - **Display**: ESP32‑2432S028R (“Cheap Yellow Display”)
@@ -154,19 +156,18 @@ ESP32 SDA (GPIO22) ---------------> INA228 SDA
 ESP32 SCL (GPIO27) ---------------> INA228 SCL
 ```
 
-![CYD ESP32‑2432S028R module with 2.8\" ILI9341 + XPT2046 touchscreen](images/cyd.webp)
-
-![Modified INA228 module: onboard R002 shunt and screw terminals removed; Kelvin sense wires extended to external 50A/75mV shunt](images/Modified-INA228-50A_75mV.png)
-
-![INA228 module with onboard R002 shunt resistor (suited to lower/medium on‑board currents)](images/ina228-r002.webp)
-
-![Optional external FL‑2C DC shunt resistor block for higher currents](images/DCShunt_Resistor_FL-2C_0.5C_10-600A.webp)
-
 ## Hardware links (affiliate)
 
 - **Shunt (50A/75mV selected; other ranges work too)**: [`https://s.click.aliexpress.com/e/_c2xnLz9D`](https://s.click.aliexpress.com/e/_c2xnLz9D)
 - **INA226 / INA228 / INA238 module**: [`https://s.click.aliexpress.com/e/_c3se5pX9`](https://s.click.aliexpress.com/e/_c3se5pX9)
 - **CYD 2.8" ESP32‑2432S028R (ILI9341 + XPT2046)**: [`https://s.click.aliexpress.com/e/_c3MhOaqP`](https://s.click.aliexpress.com/e/_c3MhOaqP)
+
+
+![CYD ESP32‑2432S028R module with 2.8\" ILI9341 + XPT2046 touchscreen](images/cyd.webp)
+
+![INA228 module with onboard R002 shunt resistor (suited to lower/medium on‑board currents)](images/ina228-r002.webp)
+
+![Optional external FL‑2C DC shunt resistor block for higher currents](images/DCShunt_Resistor_FL-2C_0.5C_10-600A.webp)
 
 ## References
 
