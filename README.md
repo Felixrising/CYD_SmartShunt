@@ -156,7 +156,7 @@ ESP32 SCL (GPIO27) ---------------> INA228 SCL
 
 ![CYD ESP32‑2432S028R module with 2.8\" ILI9341 + XPT2046 touchscreen](images/cyd.webp)
 
-![Modified INA228 module (50A/75mV external shunt)](images/Modified-INA228-50A_75mV.png)
+![Modified INA228 module: onboard R002 shunt and screw terminals removed; Kelvin sense wires extended to external 50A/75mV shunt](images/Modified-INA228-50A_75mV.png)
 
 ![INA228 module with onboard R002 shunt resistor (suited to lower/medium on‑board currents)](images/ina228-r002.webp)
 
