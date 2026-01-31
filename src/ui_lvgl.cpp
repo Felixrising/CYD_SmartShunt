@@ -12,6 +12,7 @@
 #include <TFT_eSPI.h>
 #include <Arduino.h>
 #include <math.h>
+#include <cstring>
 
 extern TFT_eSPI tft;
 
@@ -75,6 +76,7 @@ static lv_obj_t *scr_shunt_calibration = NULL;
 static lv_obj_t *scr_shunt_standard = NULL;
 static lv_obj_t *scr_known_load = NULL;
 static lv_obj_t *scr_calc_mv = NULL;
+static lv_obj_t *scr_about = NULL;
 
 static lv_obj_t *label_current = NULL;
 static lv_obj_t *label_voltage = NULL;
@@ -136,6 +138,22 @@ static void my_touchpad_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
   data->state   = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
+/* True when active sensor is INA228 (20-bit); allow more decimals. */
+static bool sensor_is_ina228(void) {
+  const char *drv = SensorGetDriverName();
+  return drv && (strcmp(drv, "INA228") == 0);
+}
+
+/* Decimal places from magnitude: small values get more decimals, large get fewer (no fake precision). */
+static int decimals_for_magnitude(double value, int sig_figs, int max_decimals) {
+  double a = fabs(value);
+  if (a < 1e-12) return max_decimals; /* zero or near-zero */
+  int mag = (int)floor(log10(a));
+  int dec = sig_figs - 1 - mag;
+  if (dec < 0) return 0;
+  return dec > max_decimals ? max_decimals : dec;
+}
+
 /* ─── Navigation ─── */
 static void to_monitor(lv_event_t *e) {
   (void)e;
@@ -175,6 +193,11 @@ static void to_system(lv_event_t *e) {
 static void to_integration(lv_event_t *e) {
   (void)e;
   if (scr_integration) lv_screen_load(scr_integration);
+}
+
+static void to_about(lv_event_t *e) {
+  (void)e;
+  if (scr_about) lv_screen_load(scr_about);
 }
 
 static void to_shunt_calibration(lv_event_t *e) {
@@ -468,10 +491,15 @@ static void hist_refresh_chart(hist_popup_t *hp) {
   }
   lv_chart_refresh(hp->chart);
 
-  /* Update Y-scale label (min - max unit). Use ASCII only: no extended/Unicode chars on LVGL display. */
+  /* Update Y-scale label (min - max unit). Adaptive decimals; current/voltage capped at 3 (mA/mV). */
   if (hp->label_scale && hp->unit) {
     char scale_buf[32];
-    snprintf(scale_buf, sizeof(scale_buf), "%.2f - %.2f %s", (double)vmin, (double)vmax, hp->unit);
+    double range_mag = (double)fmaxf(fabsf(vmin), fabsf(vmax));
+    int sig = sensor_is_ina228() ? 4 : 3;
+    int max_dec = (hp->metric == HIST_V || hp->metric == HIST_I) ? 3 : 4;
+    int dec = decimals_for_magnitude(range_mag, sig, max_dec);
+    if (dec < 0) dec = 0;
+    snprintf(scale_buf, sizeof(scale_buf), "%.*f - %.*f %s", dec, (double)vmin, dec, (double)vmax, hp->unit);
     lv_label_set_text(hp->label_scale, scale_buf);
   }
 }
@@ -592,7 +620,7 @@ static void show_history_popup(hist_metric_t metric) {
   s_active_hist_popup = &hp;
 
   const char *titles[] = { "Voltage", "Current", "Power", "Energy" };
-  const char *units[] = { "V", "A", "W", "Wh" };
+  static const char *units[] = { "V", "A", "W", "Wh" };
 
   /* History popup: modal (flex col) -> title, then graph area (scale, chart, buttons). Spacing uses GAP/GRID. */
   hp.modal = lv_obj_create(lv_screen_active());
@@ -1560,6 +1588,7 @@ static lv_obj_t *add_category_row_flex(lv_obj_t *parent, const char *name, lv_ev
   lv_obj_set_size(row, DISP_W - 2 * MARGIN, LIST_ITEM_H);
   lv_obj_set_style_radius(row, CARD_R, 0);
   lv_obj_set_style_bg_color(row, lv_color_hex(COL_CARD), 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *lbl = lv_label_create(row);
   lv_label_set_text(lbl, name);
@@ -1691,12 +1720,23 @@ static void build_settings_home(void) {
 
   add_header_back_to_monitor(scr_settings_home, "Settings");
 
-  lv_coord_t y = HEADER_H + GAP;
-  add_category_row(scr_settings_home, "Measurement  >", y, to_measurement);   y += LIST_ITEM_H + GAP;
-  add_category_row(scr_settings_home, "Calibration  >", y, to_calibration);   y += LIST_ITEM_H + GAP;
-  add_category_row(scr_settings_home, "Data  >",        y, to_data);          y += LIST_ITEM_H + GAP;
-  add_category_row(scr_settings_home, "Integration  >", y, to_integration);   y += LIST_ITEM_H + GAP;
-  add_category_row(scr_settings_home, "System  >",     y, to_system);
+  /* Scrollable list below header so all categories (including About) are reachable */
+  lv_obj_t *list = lv_obj_create(scr_settings_home);
+  lv_obj_set_size(list, DISP_W, DISP_H - HEADER_H);
+  lv_obj_set_pos(list, 0, HEADER_H);
+  lv_obj_set_style_bg_color(list, lv_color_hex(COL_BG), 0);
+  lv_obj_set_style_pad_all(list, MARGIN, 0);
+  lv_obj_set_style_pad_row(list, GAP, 0);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+
+  add_category_row_flex(list, "Measurement  >", to_measurement);
+  add_category_row_flex(list, "Calibration  >", to_calibration);
+  add_category_row_flex(list, "Data  >", to_data);
+  add_category_row_flex(list, "Integration  >", to_integration);
+  add_category_row_flex(list, "System  >", to_system);
+  add_category_row_flex(list, "About  >", to_about);
 }
 
 /* ─── Screen 3: Measurement ─── */
@@ -1910,6 +1950,62 @@ static void build_integration(void) {
   add_setting_row(scr_integration, "UART", uart_buf, y, NULL);
 }
 
+/* ─── About (version, author, thanks to libraries) ─── */
+#define CYD_SMARTSHUNT_VERSION "1.0.0"
+#define CYD_SMARTSHUNT_AUTHOR  "FelixRising"
+
+static void build_about(void) {
+  scr_about = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr_about, lv_color_hex(COL_BG), 0);
+
+  add_header_back_to_settings(scr_about, "About");
+
+  lv_obj_t *scroll = lv_obj_create(scr_about);
+  lv_obj_set_size(scroll, DISP_W, DISP_H - HEADER_H);
+  lv_obj_set_pos(scroll, 0, HEADER_H);
+  lv_obj_set_style_bg_color(scroll, lv_color_hex(COL_BG), 0);
+  lv_obj_set_style_pad_all(scroll, MARGIN, 0);
+  lv_obj_set_style_pad_row(scroll, GAP, 0);
+  lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scrollbar_mode(scroll, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+  /* App title and version */
+  lv_obj_t *tit = lv_label_create(scroll);
+  lv_label_set_text(tit, "CYD Smart Shunt");
+  lv_obj_set_style_text_color(tit, lv_color_hex(COL_ACCENT), 0);
+  lv_obj_set_style_text_font(tit, &lv_font_montserrat_20, 0);
+
+  lv_obj_t *ver = lv_label_create(scroll);
+  lv_label_set_text_fmt(ver, "Version %s", CYD_SMARTSHUNT_VERSION);
+  lv_obj_set_style_text_color(ver, lv_color_hex(COL_TEXT), 0);
+
+  lv_obj_t *auth = lv_label_create(scroll);
+  lv_label_set_text_fmt(auth, "Author: %s", CYD_SMARTSHUNT_AUTHOR);
+  lv_obj_set_style_text_color(auth, lv_color_hex(COL_MUTED), 0);
+
+  lv_obj_t *sep = lv_label_create(scroll);
+  lv_label_set_text(sep, " ");
+  lv_obj_t *thanks_tit = lv_label_create(scroll);
+  lv_label_set_text(thanks_tit, "Thanks to libraries");
+  lv_obj_set_style_text_color(thanks_tit, lv_color_hex(COL_MUTED), 0);
+
+  /* Library rows: name, version, author (ASCII only for display) */
+  struct { const char *name; const char *version; const char *author; } libs[] = {
+    { "TFT_eSPI",        "2.5.x",  "Bodmer" },
+    { "XPT2046_Touchscreen", "1.4", "Paul Stoffregen" },
+    { "INA228",          "0.4.x",  "Rob Tillaart" },
+    { "INA226",          "0.6.x",  "Rob Tillaart" },
+    { "INA219",          "0.4.x",  "Rob Tillaart" },
+    { "LVGL",            "9.x",    "LVGL team (lvgl.io)" },
+  };
+  for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]); i++) {
+    lv_obj_t *row = lv_label_create(scroll);
+    lv_label_set_text_fmt(row, "%s %s - %s", libs[i].name, libs[i].version, libs[i].author);
+    lv_obj_set_style_text_color(row, lv_color_hex(COL_TEXT), 0);
+  }
+}
+
 /* ─── History push (called from update_timer) ─── */
 static void history_push(float v, float i, float p, double e) {
   s_history_v[s_history_write_idx] = v;
@@ -1929,6 +2025,7 @@ static void update_timer_cb(lv_timer_t *timer) {
   double energy     = SensorGetWattHour();
   float temperature = SensorGetTemperature();
   bool  connected   = SensorIsConnected();
+  bool  ina228      = sensor_is_ina228();
 
   history_push(voltage, current, power, energy);
 
@@ -1938,16 +2035,22 @@ static void update_timer_cb(lv_timer_t *timer) {
   if (label_current && label_voltage && label_power && label_energy && label_status) {
     char buf[48];
     if (connected) {
-      snprintf(buf, sizeof(buf), "%.3f A", (double)current);
+      int sig = ina228 ? 4 : 3;  /* INA228: one extra significant figure */
+      int dc = decimals_for_magnitude((double)current, sig, 3);  /* milliamps max */
+      snprintf(buf, sizeof(buf), "%.*f A", dc, (double)current);
       lv_label_set_text(label_current, buf);
-      snprintf(buf, sizeof(buf), "%.2f V", (double)voltage);
+      int dv = decimals_for_magnitude((double)voltage, sig, 3);  /* millivolts max */
+      snprintf(buf, sizeof(buf), "%.*f V", dv, (double)voltage);
       lv_label_set_text(label_voltage, buf);
-      snprintf(buf, sizeof(buf), "%.1f W", (double)power);
+      int dp = decimals_for_magnitude((double)power, sig, 3);
+      snprintf(buf, sizeof(buf), "%.*f W", dp, (double)power);
       lv_label_set_text(label_power, buf);
-      if (energy >= 1000.0)
-        snprintf(buf, sizeof(buf), "%.3f kWh", (double)(energy / 1000.0));
-      else
-        snprintf(buf, sizeof(buf), "%.1f Wh", (double)energy);
+      if (energy >= 1000.0) {
+        snprintf(buf, sizeof(buf), "%.2f kWh", (double)(energy / 1000.0));
+      } else {
+        int de = decimals_for_magnitude(energy, sig, 3);
+        snprintf(buf, sizeof(buf), "%.*f Wh", de, energy);
+      }
       lv_label_set_text(label_energy, buf);
       snprintf(buf, sizeof(buf), "CYD SmartShunt %s %.1fC", SensorGetDriverName(), (double)temperature);
       lv_label_set_text(label_status, buf);
@@ -1965,7 +2068,10 @@ static void update_timer_cb(lv_timer_t *timer) {
 
   if (lv_screen_active() == scr_known_load && label_known_measured && label_known_corrected) {
     char buf[40];
-    snprintf(buf, sizeof(buf), "%.3f A / %.2f V", (double)current, (double)voltage);
+    int sig = sensor_is_ina228() ? 4 : 3;
+    int dc = decimals_for_magnitude((double)current, sig, 3);  /* milliamps max */
+    int dv = decimals_for_magnitude((double)voltage, sig, 3);  /* millivolts max */
+    snprintf(buf, sizeof(buf), "%.*f A / %.*f V", dc, (double)current, dv, (double)voltage);
     lv_label_set_text(label_known_measured, buf);
     if (current != 0.0f && voltage != 0.0f && known_load_current > 0.0f) {
       float corr_shunt = shuntResistance * (current / known_load_current);
@@ -2002,6 +2108,8 @@ void ui_lvgl_init(void) {
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, my_touchpad_read_cb);
+  /* Low scroll limit: small vertical drag starts scrolling so list scroll wins over row click */
+  lv_indev_set_scroll_limit(indev, 4);
 
   build_monitor();
   build_settings_home();
@@ -2014,6 +2122,7 @@ void ui_lvgl_init(void) {
   build_data();
   build_system();
   build_integration();
+  build_about();
 
   lv_screen_load(scr_monitor);
 

@@ -31,6 +31,12 @@ An ESP32 Cheap Yellow Display (CYD) based **DC current & voltage meter** with a 
     for **higher current work you should use an external shunt** such as the CG FL‑2C block.  
     This requires **removing/desoldering the onboard shunt resistor and wiring the external shunt into its Kelvin pads** on the module.
 
+## Documentation
+
+- **[How to add new sensors](docs/HOW_TO_ADD_NEW_SENSORS.md)** — Step-by-step guide for adding another INA or compatible chip (backend API, detection, dispatch, optional display precision).
+- **[Release readiness](docs/RELEASE_READINESS.md)** — Checklist and notes for cutting a GitHub release.
+- **Other docs:** `docs/METRICS_UNITS_AND_PRECISION.md` (units and decimals), `docs/UPDATE_RATES_AND_SUGGESTIONS.md`, `docs/LEGACY_UI_REMOVAL.md`, `docs/BLE_GATT_plan.md`.
+
 ## Getting started
 
 ### Prerequisites
