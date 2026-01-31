@@ -17,6 +17,12 @@ An ESP32 Cheap Yellow Display (CYD) based **DC current & voltage meter** with a 
   - Shunt calibration: standard shunt list + known‑load calibration
   - Value entry with digit cursor, coarse/fine steps, and keypad fallback
 
+**Assembled product (CYD + modified INA228 50A/75mV)**
+
+![CYD Smart Shunt dashboard](images/CYD_SmartShunt-Dashboard.png)
+
+![Settings screen – shunt calibration](images/CYD_Settings-Modified-INA228-50A_75mV.png)
+
 ## Hardware
 
 - **Display**: ESP32‑2432S028R (“Cheap Yellow Display”)
@@ -149,6 +155,8 @@ ESP32 SCL (GPIO27) ---------------> INA228 SCL
 ```
 
 ![CYD ESP32‑2432S028R module with 2.8\" ILI9341 + XPT2046 touchscreen](images/cyd.webp)
+
+![Modified INA228 module (50A/75mV external shunt)](images/Modified-INA228-50A_75mV.png)
 
 ![INA228 module with onboard R002 shunt resistor (suited to lower/medium on‑board currents)](images/ina228-r002.webp)
 
